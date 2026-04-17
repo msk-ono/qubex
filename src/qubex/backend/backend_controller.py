@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import (
     TYPE_CHECKING,
@@ -53,8 +54,8 @@ class BackendController(Protocol):
 
     This protocol defines the minimum API that both QuEL-1 and QuEL-3
     controllers must provide to the measurement layer:
-    `hash`, `is_connected`, `sampling_period_ns`, `execute_sync`,
-    `execute_async`, `connect`, and `disconnect`.
+    `hash`, `is_connected`, `sampling_period_ns`,`execute_sync`, `execute_async`,
+    `execute_batch_async`, `connect`, and `disconnect`.
     """
 
     @property
@@ -90,6 +91,16 @@ class BackendController(Protocol):
         clock_health_checks: bool | None = None,
     ) -> BackendExecutionResult:
         """Execute prepared backend request payload asynchronously."""
+        ...
+
+    async def execute_batch_async(
+        self,
+        *,
+        requests: Sequence[BackendExecutionRequest],
+        execution_mode: BackendExecutionMode | None = None,
+        clock_health_checks: bool | None = None,
+    ) -> list[BackendExecutionResult]:
+        """Execute multiple prepared backend request payloads asynchronously."""
         ...
 
     def connect(

@@ -9,7 +9,7 @@ capabilities, while delegating concrete operations to QuEL-1 managers.
 from __future__ import annotations
 
 import logging
-from collections.abc import Collection
+from collections.abc import Collection, Sequence
 from copy import deepcopy
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -850,3 +850,20 @@ class Quel1BackendController(BackendController):
             execution_mode=execution_mode,
             clock_health_checks=clock_health_checks,
         )
+
+    async def execute_batch_async(
+        self,
+        *,
+        requests: Sequence[BackendExecutionRequest],
+        execution_mode: ExecutionMode | None = None,
+        clock_health_checks: bool | None = None,
+    ) -> list[BackendExecutionResult]:
+        """Execute multiple requests sequentially using the async single-request path."""
+        return [
+            await self.execute_async(
+                request=request,
+                execution_mode=execution_mode,
+                clock_health_checks=clock_health_checks,
+            )
+            for request in requests
+        ]
