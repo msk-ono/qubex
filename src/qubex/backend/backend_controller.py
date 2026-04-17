@@ -72,6 +72,11 @@ class BackendController(Protocol):
         """Return backend sampling period in ns."""
         ...
 
+    @property
+    def CAPTURE_DECIMATION_FACTOR(self) -> int:
+        """Return backend capture decimation factor."""
+        ...
+
     def execute_sync(
         self,
         *,
