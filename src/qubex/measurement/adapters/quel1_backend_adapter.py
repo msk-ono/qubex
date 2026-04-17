@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Mapping
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -200,6 +201,13 @@ class Quel1MeasurementBackendAdapter:
                     f"Final post-blank must be a multiple of {word_duration} ns."
                 )
 
+    def _resolve_device_config(self) -> dict[str, object]:
+        """Resolve one backend config snapshot for canonical measurement results."""
+        box_config = getattr(self._backend_controller, "box_config", None)
+        if isinstance(box_config, Mapping):
+            return dict(box_config)
+        return {}
+
     def build_execution_request(
         self,
         *,
@@ -287,7 +295,6 @@ class Quel1MeasurementBackendAdapter:
         *,
         backend_result: object,
         measurement_config: MeasurementConfig,
-        device_config: dict,
         sampling_period: float,
     ) -> MeasurementResult:
         """Build canonical result from a QuEL-1 backend result payload."""
@@ -375,7 +382,7 @@ class Quel1MeasurementBackendAdapter:
 
         return MeasurementResult(
             data=measure_data,
-            device_config=device_config,
+            device_config=self._resolve_device_config(),
             measurement_config=measurement_config,
         )
 

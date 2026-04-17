@@ -156,17 +156,19 @@ def test_build_measurement_result_keeps_monitor_labels() -> None:
             raise KeyError(target)
 
     adapter = Quel1MeasurementBackendAdapter(
-        backend_controller=cast(Any, object()),
+        backend_controller=cast(
+            Any, type("_BC", (), {"box_config": {"kind": "quel1"}})()
+        ),
         experiment_system=cast(Any, _ExperimentSystemStub()),
     )
 
     result = adapter.build_measurement_result(
         backend_result=backend_result,
         measurement_config=_make_config(mode="single", shots=4),
-        device_config={"kind": "quel1"},
         sampling_period=2.0,
     )
 
+    assert result.device_config == {"kind": "quel1"}
     assert set(result.data.keys()) == {"Q00", "B0.MNTR0.IN"}
     assert_allclose(
         result.data["Q00"][0].data,

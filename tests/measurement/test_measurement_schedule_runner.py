@@ -110,13 +110,11 @@ def test_execute_async_validates_builds_calls_backend_and_creates_result() -> No
             *,
             backend_result: object,
             measurement_config: MeasurementConfig,
-            device_config: dict[str, object],
             sampling_period: float,
         ) -> MeasurementResult:
             called["result_kwargs"] = {
                 "backend_result": backend_result,
                 "measurement_config": measurement_config,
-                "device_config": device_config,
                 "sampling_period": sampling_period,
             }
             return expected
@@ -148,7 +146,6 @@ def test_execute_async_validates_builds_calls_backend_and_creates_result() -> No
     result_kwargs = cast(dict[str, object], called["result_kwargs"])
     assert result_kwargs["backend_result"] is backend_result
     assert result_kwargs["measurement_config"] is config
-    assert result_kwargs["device_config"] == {"shots": 2}
     assert result_kwargs["sampling_period"] == 8.0
     assert result is expected
 
@@ -182,12 +179,10 @@ def test_execute_async_forwards_execution_options_to_backend_controller() -> Non
             *,
             backend_result: object,
             measurement_config: MeasurementConfig,
-            device_config: dict[str, object],
             sampling_period: float,
         ) -> MeasurementResult:
             _ = backend_result
             _ = measurement_config
-            _ = device_config
             _ = sampling_period
             return expected
 
@@ -252,13 +247,11 @@ def test_execute_async_falls_back_to_empty_device_config_without_box_config() ->
             *,
             backend_result: object,
             measurement_config: MeasurementConfig,
-            device_config: dict[str, object],
             sampling_period: float,
         ) -> MeasurementResult:
             called["result_kwargs"] = {
                 "backend_result": backend_result,
                 "measurement_config": measurement_config,
-                "device_config": device_config,
                 "sampling_period": sampling_period,
             }
             return expected
@@ -283,7 +276,8 @@ def test_execute_async_falls_back_to_empty_device_config_without_box_config() ->
     )
 
     result_kwargs = cast(dict[str, object], called["result_kwargs"])
-    assert result_kwargs["device_config"] == {}
+    assert result_kwargs["backend_result"] is backend_result
+    assert result_kwargs["measurement_config"] == _make_config()
     assert result is expected
 
 
@@ -316,12 +310,10 @@ def test_execute_async_prefers_backend_capture_decimation_hint() -> None:
             *,
             backend_result: object,
             measurement_config: MeasurementConfig,
-            device_config: dict[str, object],
             sampling_period: float,
         ) -> MeasurementResult:
             _ = backend_result
             _ = measurement_config
-            _ = device_config
             called["sampling_period"] = sampling_period
             return expected
 
@@ -432,10 +424,9 @@ def test_execute_many_async_uses_backend_batch_api_when_available() -> None:
             *,
             backend_result: object,
             measurement_config: MeasurementConfig,
-            device_config: dict[str, object],
             sampling_period: float,
         ) -> MeasurementResult:
-            _ = (backend_result, measurement_config, device_config, sampling_period)
+            _ = (backend_result, measurement_config, sampling_period)
             return expected
 
     class _BackendController:
@@ -506,19 +497,22 @@ def test_execute_async_prefers_adapter_measurement_result_builder_when_available
             *,
             backend_result: object,
             measurement_config: MeasurementConfig,
-            device_config: dict[str, object],
             sampling_period: float,
         ) -> MeasurementResult:
             called["builder_backend_result"] = backend_result
             called["builder_measurement_config"] = measurement_config
-            called["builder_device_config"] = device_config
             called["builder_sampling_period"] = sampling_period
             return expected
 
     class _BackendController:
-        box_config: ClassVar[dict[str, str]] = {"kind": "quel3"}
         sampling_period_ns: ClassVar[float] = 0.4
         CAPTURE_DECIMATION_FACTOR: ClassVar[int] = 4
+
+        @property
+        def box_config(self) -> dict[str, str]:
+            raise AssertionError(
+                "MeasurementScheduleRunner should not directly read backend_controller.box_config"
+            )
 
         async def execute_async(
             self, *, request: BackendExecutionRequest
@@ -541,7 +535,6 @@ def test_execute_async_prefers_adapter_measurement_result_builder_when_available
     assert called["execute_request"] is request
     assert called["builder_backend_result"] is backend_result
     assert called["builder_measurement_config"] is config
-    assert called["builder_device_config"] == {"kind": "quel3"}
     assert called["builder_sampling_period"] == 1.6
     assert result is expected
 

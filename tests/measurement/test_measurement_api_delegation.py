@@ -1586,13 +1586,11 @@ def test_run_measurement_selects_quel3_adapter_from_controller_type(
             *,
             backend_result: object,
             measurement_config: MeasurementConfig,
-            device_config: dict[str, object],
             sampling_period: float,
         ) -> MeasurementResult:
             called["result_kwargs"] = {
                 "backend_result": backend_result,
                 "measurement_config": measurement_config,
-                "device_config": device_config,
                 "sampling_period": sampling_period,
             }
             return _make_measurement_result(
