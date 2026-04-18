@@ -96,11 +96,7 @@ class MeasurementScheduleRunner:
         else:
             device_config = {}
 
-        capture_decimation_factor = getattr(
-            self._backend_controller,
-            "CAPTURE_DECIMATION_FACTOR",
-            None,
-        )
+        capture_decimation_factor = self._backend_controller.CAPTURE_DECIMATION_FACTOR
         if not (
             isinstance(capture_decimation_factor, int) and capture_decimation_factor > 0
         ):
