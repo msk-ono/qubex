@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-from typing import Any, cast
+from typing import cast
 
 from qubex.backend import (
     BackendController,
@@ -90,12 +89,6 @@ class MeasurementScheduleRunner:
         if isinstance(backend_result, MeasurementResult):
             return backend_result
 
-        box_config = getattr(self._backend_controller, "box_config", None)
-        if isinstance(box_config, Mapping):
-            device_config: dict[str, Any] = dict(box_config)
-        else:
-            device_config = {}
-
         capture_decimation_factor = self._backend_controller.CAPTURE_DECIMATION_FACTOR
         if not (
             isinstance(capture_decimation_factor, int) and capture_decimation_factor > 0
@@ -111,7 +104,6 @@ class MeasurementScheduleRunner:
         return self._measurement_backend_adapter.build_measurement_result(
             backend_result=backend_result,
             measurement_config=config,
-            device_config=device_config,
             sampling_period=sampling_period,
         )
 

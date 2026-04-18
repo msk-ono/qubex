@@ -114,7 +114,6 @@ def test_to_multiple_measure_result_returns_wrapped_result() -> None:
     )
     restored = MeasurementResultConverter.to_multiple_measure_result(
         result,
-        config=multiple.config,
     )
 
     assert restored.mode == multiple.mode
@@ -140,7 +139,6 @@ def test_to_measure_result_selects_requested_index() -> None:
     single: MeasureResult = MeasurementResultConverter.to_measure_result(
         result,
         index=1,
-        config=multiple.config,
     )
 
     assert single.mode == MeasureMode.AVG

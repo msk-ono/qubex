@@ -235,6 +235,80 @@ def test_execute_delegates_to_schedule_executor_with_built_schedule(
     assert called["run_config"].shot_averaging is True
 
 
+def test_execute_uses_result_device_config_for_legacy_conversion(
+    monkeypatch,
+) -> None:
+    """Given canonical result device config, execute should preserve it in legacy conversion."""
+    measurement = Measurement(
+        chip_id="TEST",
+        qubits=["Q00"],
+        load_configs=False,
+        connect_devices=False,
+    )
+    pulse_schedule = PulseSchedule(["Q00"])
+    built_schedule = MeasurementSchedule(
+        pulse_schedule=PulseSchedule(["RQ00"]),
+        capture_schedule=CaptureSchedule(captures=[]),
+    )
+    canonical_result = _make_measurement_result(
+        data={"Q00": [np.array([1.0 + 0.0j])]},
+        measurement_config=_make_config(),
+        sampling_period=2.0,
+        device_config={"kind": "adapter"},
+    )
+
+    def fake_build(
+        self: MeasurementExecutionService,
+        *,
+        pulse_schedule: PulseSchedule,
+        **kwargs: object,
+    ) -> MeasurementSchedule:
+        _ = (pulse_schedule, kwargs)
+        return built_schedule
+
+    class _Executor:
+        def execute_sync(
+            self,
+            *,
+            schedule: MeasurementSchedule,
+            config: MeasurementConfig,
+            quel1_options: Quel1MeasurementOptions | None = None,
+        ) -> MeasurementResult:
+            _ = (schedule, config, quel1_options)
+            return canonical_result
+
+    execution_service = measurement.execution_service
+    execution_service.build_measurement_schedule = MethodType(
+        fake_build, execution_service
+    )
+    monkeypatch.setattr(
+        MeasurementExecutionService,
+        "measurement_schedule_runner",
+        property(lambda self: _Executor()),
+    )
+    experiment_system = type(
+        "_ES",
+        (),
+        {
+            "control_params": type("_CP", (), {"readout_amplitude": {}})(),
+            "measurement_defaults": {},
+        },
+    )()
+    _bind_runtime(
+        measurement,
+        backend_controller=object(),
+        experiment_system=experiment_system,
+        rawdata_dir=None,
+    )
+
+    result = measurement.execute(
+        schedule=pulse_schedule,
+        final_measurement=True,
+    )
+
+    assert result.config == {"kind": "adapter"}
+
+
 def test_execute_forwards_frequency_overrides_to_schedule_builder(
     monkeypatch,
 ) -> None:
@@ -1610,13 +1684,11 @@ def test_run_measurement_selects_quel3_adapter_from_controller_type(
             *,
             backend_result: object,
             measurement_config: MeasurementConfig,
-            device_config: dict[str, object],
             sampling_period: float,
         ) -> MeasurementResult:
             called["result_kwargs"] = {
                 "backend_result": backend_result,
                 "measurement_config": measurement_config,
-                "device_config": device_config,
                 "sampling_period": sampling_period,
             }
             return _make_measurement_result(

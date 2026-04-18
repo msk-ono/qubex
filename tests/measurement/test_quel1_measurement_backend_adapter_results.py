@@ -65,7 +65,9 @@ def test_build_measurement_result_converts_single_mode_to_qubit_labels() -> None
         config={},
     )
     adapter = Quel1MeasurementBackendAdapter(
-        backend_controller=cast(Any, object()),
+        backend_controller=cast(
+            Any, type("_BC", (), {"box_config": {"kind": "quel1"}})()
+        ),
         experiment_system=cast(
             Any,
             _ExperimentSystemStub(sideband_by_target={"RQ00": "L"}),
@@ -75,7 +77,6 @@ def test_build_measurement_result_converts_single_mode_to_qubit_labels() -> None
     result = adapter.build_measurement_result(
         backend_result=backend_result,
         measurement_config=_make_config(mode="single", shots=4),
-        device_config={"kind": "quel1"},
         sampling_period=2.0,
     )
 
@@ -108,7 +109,7 @@ def test_build_measurement_result_converts_avg_mode_with_shot_scaling() -> None:
         config={},
     )
     adapter = Quel1MeasurementBackendAdapter(
-        backend_controller=cast(Any, object()),
+        backend_controller=cast(Any, type("_BC", (), {"box_config": {}})()),
         experiment_system=cast(
             Any,
             _ExperimentSystemStub(sideband_by_target={"RQ00": "U"}),
@@ -118,10 +119,10 @@ def test_build_measurement_result_converts_avg_mode_with_shot_scaling() -> None:
     result = adapter.build_measurement_result(
         backend_result=backend_result,
         measurement_config=_make_config(mode="avg", shots=4),
-        device_config={"kind": "quel1"},
         sampling_period=2.0,
     )
 
+    assert result.device_config == {}
     assert result.measurement_config.shot_averaging is True
     assert set(result.data.keys()) == {"Q00"}
     assert len(result.data["Q00"]) == 1
@@ -142,7 +143,9 @@ def test_build_measurement_result_keeps_single_point_avg_mode_as_length_one_wave
         config={},
     )
     adapter = Quel1MeasurementBackendAdapter(
-        backend_controller=cast(Any, object()),
+        backend_controller=cast(
+            Any, type("_BC", (), {"box_config": {"kind": "quel1"}})()
+        ),
         experiment_system=cast(
             Any,
             _ExperimentSystemStub(sideband_by_target={"RQ00": "U"}),
@@ -156,10 +159,10 @@ def test_build_measurement_result_keeps_single_point_avg_mode_as_length_one_wave
     result = adapter.build_measurement_result(
         backend_result=backend_result,
         measurement_config=_make_config(mode="avg", shots=4),
-        device_config={"kind": "quel1"},
         sampling_period=2.0,
     )
 
+    assert result.device_config == {"kind": "quel1"}
     assert_allclose(
         result.data["Q00"][0].data,
         np.array([2.0 + 1.0j], dtype=np.complex128) * norm_factor,
@@ -187,7 +190,7 @@ def test_build_measurement_result_normalizes_time_integrated_single_mode_to_1d()
         config={},
     )
     adapter = Quel1MeasurementBackendAdapter(
-        backend_controller=cast(Any, object()),
+        backend_controller=cast(Any, type("_BC", (), {"box_config": {}})()),
         experiment_system=cast(
             Any,
             _ExperimentSystemStub(sideband_by_target={"RQ00": "U"}),
@@ -205,10 +208,10 @@ def test_build_measurement_result_normalizes_time_integrated_single_mode_to_1d()
             shots=2,
             time_integration=True,
         ),
-        device_config={"kind": "quel1"},
         sampling_period=2.0,
     )
 
+    assert result.device_config == {}
     assert_allclose(
         result.data["Q00"][0].data,
         np.array([8.0 + 4.0j, 12.0 + 6.0j], dtype=np.complex128) * norm_factor,

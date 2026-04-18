@@ -81,7 +81,6 @@ class MeasurementResultConverter:
     def to_multiple_measure_result(
         result: MeasurementResult,
         *,
-        config: dict[str, Any] | None = None,
         classifiers: Mapping[str, StateClassifier] | None = None,
         sampling_period: float | None = None,
     ) -> MultipleMeasureResult:
@@ -92,8 +91,6 @@ class MeasurementResultConverter:
         ----------
         result : MeasurementResult
             Canonical result.
-        config : dict[str, Any] | None, optional
-            Legacy config payload. Falls back to `result.device_config` or `{}`.
         classifiers : dict[str, StateClassifier] | None, optional
             Optional legacy classifiers keyed by target.
 
@@ -105,12 +102,9 @@ class MeasurementResultConverter:
         mode = MeasurementResultConverter._resolve_measure_mode(
             result.measurement_config
         )
-        if config is None:
-            resolved_config: dict[str, Any] = (
-                {} if result.device_config is None else result.device_config
-            )
-        else:
-            resolved_config = config
+        device_config: dict[str, Any] = (
+            {} if result.device_config is None else result.device_config
+        )
         classifier_map = {} if classifiers is None else classifiers
         resolved_classifiers: dict[str, StateClassifier | None] = {
             target: classifier_map.get(target) for target in result.data
@@ -143,7 +137,7 @@ class MeasurementResultConverter:
         return MultipleMeasureResult(
             mode=mode,
             data=legacy_data,
-            config=resolved_config,
+            config=device_config,
         )
 
     @staticmethod
@@ -151,7 +145,6 @@ class MeasurementResultConverter:
         result: MeasurementResult,
         *,
         index: int = 0,
-        config: dict[str, Any] | None = None,
         classifiers: Mapping[str, StateClassifier] | None = None,
         sampling_period: float | None = None,
     ) -> MeasureResult:
@@ -164,8 +157,6 @@ class MeasurementResultConverter:
             Canonical result.
         index : int, optional
             Capture index in each target's result list.
-        config : dict[str, Any] | None, optional
-            Legacy config payload. Falls back to `result.device_config` or `{}`.
         classifiers : dict[str, StateClassifier] | None, optional
             Optional legacy classifiers keyed by target.
 
@@ -213,12 +204,9 @@ class MeasurementResultConverter:
                 ),
             )
 
-        if config is None:
-            resolved_config: dict[str, Any] = (
-                {} if result.device_config is None else result.device_config
-            )
-        else:
-            resolved_config = config
+        device_config: dict[str, Any] = (
+            {} if result.device_config is None else result.device_config
+        )
 
         return MeasureResult(
             mode=(
@@ -229,5 +217,5 @@ class MeasurementResultConverter:
                 )
             ),
             data=single_data,
-            config=resolved_config,
+            config=device_config,
         )

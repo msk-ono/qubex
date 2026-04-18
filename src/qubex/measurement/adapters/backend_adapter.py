@@ -36,7 +36,6 @@ class MeasurementBackendAdapter(Protocol):
         *,
         backend_result: Any,
         measurement_config: MeasurementConfig,
-        device_config: dict,
         sampling_period: float,
     ) -> MeasurementResult:
         """Build canonical result from a backend-specific result payload."""

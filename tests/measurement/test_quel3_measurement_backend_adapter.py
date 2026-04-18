@@ -531,7 +531,6 @@ def test_quel3_adapter_uses_registry_for_result_target_labels() -> None:
     result = adapter.build_measurement_result(
         backend_result=backend_result,
         measurement_config=_make_config(),
-        device_config={},
         sampling_period=0.4,
     )
 
@@ -785,7 +784,6 @@ def test_quel3_adapter_build_measurement_result_rejects_measurement_result() -> 
         adapter.build_measurement_result(
             backend_result=cast(Any, unexpected),
             measurement_config=_make_config(),
-            device_config={"kind": "quel3"},
             sampling_period=0.4,
         )
 
@@ -831,7 +829,6 @@ def test_quel3_adapter_build_measurement_result_converts_backend_result() -> Non
     result = adapter.build_measurement_result(
         backend_result=backend_result,
         measurement_config=config,
-        device_config={"unused": True},
         sampling_period=1.0,
     )
 
@@ -889,7 +886,6 @@ def test_quel3_adapter_build_measurement_result_squeezes_avg_mode_waveform() -> 
     result = adapter.build_measurement_result(
         backend_result=backend_result,
         measurement_config=config,
-        device_config={},
         sampling_period=1.0,
     )
 
@@ -950,7 +946,6 @@ def test_quel3_adapter_build_measurement_result_normalizes_iq_series_to_1d() -> 
     result = adapter.build_measurement_result(
         backend_result=backend_result,
         measurement_config=config,
-        device_config={},
         sampling_period=1.0,
     )
 
@@ -972,7 +967,6 @@ def test_quel3_adapter_build_measurement_result_rejects_noncanonical_type() -> N
         adapter.build_measurement_result(
             backend_result=cast(Any, {"iq_result": {}}),
             measurement_config=_make_config(),
-            device_config={},
             sampling_period=0.4,
         )
 
@@ -1032,7 +1026,6 @@ def test_quel3_adapter_build_measurement_result_splits_shared_alias_targets() ->
     result = adapter.build_measurement_result(
         backend_result=backend_result,
         measurement_config=_make_config(),
-        device_config={},
         sampling_period=0.4,
     )
 

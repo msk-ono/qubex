@@ -233,16 +233,6 @@ class MeasurementExecutionService:
         }
 
     @staticmethod
-    def _resolve_device_config(
-        backend_controller: BackendController,
-    ) -> dict:
-        """Resolve backend device configuration mapping."""
-        box_config = getattr(backend_controller, "box_config", None)
-        if isinstance(box_config, dict):
-            return box_config
-        return {}
-
-    @staticmethod
     def _warn_deprecated_alias(
         *,
         old_name: str,
@@ -1159,7 +1149,6 @@ class MeasurementExecutionService:
 
         return MeasurementResultConverter.to_multiple_measure_result(
             result,
-            config=self._resolve_device_config(self.backend_controller),
             classifiers=self.classifiers,
         )
 
