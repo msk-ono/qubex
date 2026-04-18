@@ -125,6 +125,30 @@ def _bind_runtime(
     measurement.execution_service.__dict__["_session_service"] = session_service
 
 
+@contextmanager
+def _patch_measurement_schedule_runner(
+    execute_many_async: Any,
+):
+    original = MeasurementExecutionService.measurement_schedule_runner
+
+    class _Runner:
+        async def execute_many_async(
+            self,
+            *,
+            schedules: list[MeasurementSchedule] | tuple[MeasurementSchedule, ...],
+            config: MeasurementConfig,
+        ) -> list[MeasurementResult]:
+            return await execute_many_async(schedules=schedules, config=config)
+
+    MeasurementExecutionService.measurement_schedule_runner = property(  # type: ignore[assignment]
+        lambda self: _Runner()
+    )
+    try:
+        yield
+    finally:
+        MeasurementExecutionService.measurement_schedule_runner = original  # type: ignore[assignment]
+
+
 def test_execute_delegates_to_schedule_executor_with_built_schedule(
     monkeypatch,
 ) -> None:
@@ -1726,32 +1750,38 @@ def test_run_sweep_measurement_calls_on_point_for_each_result() -> None:
             capture_schedule=CaptureSchedule(captures=[]),
         )
 
-    async def fake_run_measurement(
-        self: MeasurementExecutionService,
+    async def fake_execute_many_async(
         *,
-        schedule: MeasurementSchedule,
+        schedules: list[MeasurementSchedule] | tuple[MeasurementSchedule, ...],
         config: MeasurementConfig,
-    ) -> MeasurementResult:
-        del self
-        step = int(schedule.pulse_schedule.labels[0][-1])
-        return _make_measurement_result(
-            data={"Q00": [np.array([step + 0.0j])]},
-            measurement_config=config,
-            sampling_period=2.0,
-        )
+    ) -> list[MeasurementResult]:
+        return [
+            _make_measurement_result(
+                data={
+                    "Q00": [
+                        np.array(
+                            [
+                                int(measurement_schedule.pulse_schedule.labels[0][-1])
+                                + 0.0j
+                            ]
+                        )
+                    ]
+                },
+                measurement_config=config,
+                sampling_period=2.0,
+            )
+            for measurement_schedule in schedules
+        ]
 
-    execution_service.run_measurement = MethodType(
-        fake_run_measurement, execution_service
-    )
-
-    result = asyncio.run(
-        execution_service.run_sweep_measurement(
-            schedule,
-            sweep_values=sweep_values,
-            config=config,
-            on_point=lambda value, measured: callbacks.append((value, measured)),
+    with _patch_measurement_schedule_runner(fake_execute_many_async):
+        result = asyncio.run(
+            execution_service.run_sweep_measurement(
+                schedule,
+                sweep_values=sweep_values,
+                config=config,
+                on_point=lambda value, measured: callbacks.append((value, measured)),
+            )
         )
-    )
 
     assert [value for value, _ in callbacks] == sweep_values
     assert len(callbacks) == len(result.results)
@@ -1759,6 +1789,51 @@ def test_run_sweep_measurement_calls_on_point_for_each_result() -> None:
         measured is expected
         for (_, measured), expected in zip(callbacks, result.results, strict=True)
     )
+
+
+def test_run_sweep_measurement_uses_batch_execution() -> None:
+    """Given sweep execution, run_sweep_measurement should delegate all points through batch execution."""
+    measurement = Measurement(
+        chip_id="TEST",
+        qubits=["Q00"],
+        load_configs=False,
+        connect_devices=False,
+    )
+    execution_service = measurement.execution_service
+    config = _make_config()
+    batch_calls: list[int] = []
+
+    def schedule(_point: SweepValue) -> MeasurementSchedule:
+        return MeasurementSchedule(
+            pulse_schedule=PulseSchedule(["RQ00"]),
+            capture_schedule=CaptureSchedule(captures=[]),
+        )
+
+    async def fake_execute_many_async(
+        schedules: list[MeasurementSchedule] | tuple[MeasurementSchedule, ...],
+        config: MeasurementConfig,
+    ) -> list[MeasurementResult]:
+        batch_calls.append(len(schedules))
+        return [
+            _make_measurement_result(
+                data={"Q00": [np.array([1.0 + 0.0j])]},
+                measurement_config=config,
+                sampling_period=2.0,
+            )
+            for _schedule in schedules
+        ]
+
+    with _patch_measurement_schedule_runner(fake_execute_many_async):
+        result = asyncio.run(
+            execution_service.run_sweep_measurement(
+                schedule,
+                sweep_values=[0, 1],
+                config=config,
+            )
+        )
+
+    assert batch_calls == [2]
+    assert len(result.results) == 2
 
 
 def test_run_sweep_measurement_runs_points_and_returns_results() -> None:
@@ -1780,36 +1855,45 @@ def test_run_sweep_measurement_runs_points_and_returns_results() -> None:
             capture_schedule=CaptureSchedule(captures=[]),
         )
 
-    async def fake_run_measurement(
-        self: MeasurementExecutionService,
+    async def fake_execute_many_async(
         *,
-        schedule: MeasurementSchedule,
+        schedules: list[MeasurementSchedule] | tuple[MeasurementSchedule, ...],
         config: MeasurementConfig,
-    ) -> MeasurementResult:
-        del self
-        step = int(schedule.pulse_schedule.labels[0][-1])
-        return _make_measurement_result(
-            data={
-                "Q00": [
-                    np.array([step + 1.0 + 0.0j]),
-                    np.array([step + 11.0 + 0.0j]),
-                ]
-            },
-            measurement_config=config,
-            sampling_period=2.0,
-        )
+    ) -> list[MeasurementResult]:
+        return [
+            _make_measurement_result(
+                data={
+                    "Q00": [
+                        np.array(
+                            [
+                                int(measurement_schedule.pulse_schedule.labels[0][-1])
+                                + 1.0
+                                + 0.0j
+                            ]
+                        ),
+                        np.array(
+                            [
+                                int(measurement_schedule.pulse_schedule.labels[0][-1])
+                                + 11.0
+                                + 0.0j
+                            ]
+                        ),
+                    ]
+                },
+                measurement_config=config,
+                sampling_period=2.0,
+            )
+            for measurement_schedule in schedules
+        ]
 
-    execution_service.run_measurement = MethodType(
-        fake_run_measurement, execution_service
-    )
-
-    result = asyncio.run(
-        execution_service.run_sweep_measurement(
-            schedule,
-            sweep_values=sweep_values,
-            config=config,
+    with _patch_measurement_schedule_runner(fake_execute_many_async):
+        result = asyncio.run(
+            execution_service.run_sweep_measurement(
+                schedule,
+                sweep_values=sweep_values,
+                config=config,
+            )
         )
-    )
 
     assert result.sweep_values == sweep_values
     assert result.config == config
@@ -1837,36 +1921,45 @@ def test_run_sweep_measurement_data_property_returns_pointwise_data() -> None:
             capture_schedule=CaptureSchedule(captures=[]),
         )
 
-    async def fake_run_measurement(
-        self: MeasurementExecutionService,
+    async def fake_execute_many_async(
         *,
-        schedule: MeasurementSchedule,
+        schedules: list[MeasurementSchedule] | tuple[MeasurementSchedule, ...],
         config: MeasurementConfig,
-    ) -> MeasurementResult:
-        del self
-        step = int(schedule.pulse_schedule.labels[0][-1])
-        return _make_measurement_result(
-            data={
-                "Q00": [
-                    np.array([step + 1.0 + 0.0j]),
-                    np.array([step + 11.0 + 0.0j]),
-                ]
-            },
-            measurement_config=config,
-            sampling_period=2.0,
-        )
+    ) -> list[MeasurementResult]:
+        return [
+            _make_measurement_result(
+                data={
+                    "Q00": [
+                        np.array(
+                            [
+                                int(measurement_schedule.pulse_schedule.labels[0][-1])
+                                + 1.0
+                                + 0.0j
+                            ]
+                        ),
+                        np.array(
+                            [
+                                int(measurement_schedule.pulse_schedule.labels[0][-1])
+                                + 11.0
+                                + 0.0j
+                            ]
+                        ),
+                    ]
+                },
+                measurement_config=config,
+                sampling_period=2.0,
+            )
+            for measurement_schedule in schedules
+        ]
 
-    execution_service.run_measurement = MethodType(
-        fake_run_measurement, execution_service
-    )
-
-    result = asyncio.run(
-        execution_service.run_sweep_measurement(
-            schedule,
-            sweep_values=[0, 1],
-            config=config,
+    with _patch_measurement_schedule_runner(fake_execute_many_async):
+        result = asyncio.run(
+            execution_service.run_sweep_measurement(
+                schedule,
+                sweep_values=[0, 1],
+                config=config,
+            )
         )
-    )
 
     assert set(result.data) == {"Q00"}
     assert len(result.data["Q00"]) == 2
@@ -1908,40 +2001,53 @@ def test_run_sweep_measurement_data_property_uses_canonical_iq_series_shape() ->
             capture_schedule=CaptureSchedule(captures=[]),
         )
 
-    async def fake_run_measurement(
-        self: MeasurementExecutionService,
+    async def fake_execute_many_async(
         *,
-        schedule: MeasurementSchedule,
+        schedules: list[MeasurementSchedule] | tuple[MeasurementSchedule, ...],
         config: MeasurementConfig,
-    ) -> MeasurementResult:
-        del self
-        step = int(schedule.pulse_schedule.labels[0][-1])
-        return _make_measurement_result(
-            data={
-                "Q00": [
-                    np.array(
-                        [
-                            [step + 1.0 + 0.0j],
-                            [step + 2.0 + 0.0j],
-                        ]
-                    )
-                ]
-            },
-            measurement_config=config,
-            sampling_period=2.0,
-        )
+    ) -> list[MeasurementResult]:
+        return [
+            _make_measurement_result(
+                data={
+                    "Q00": [
+                        np.array(
+                            [
+                                [
+                                    int(
+                                        measurement_schedule.pulse_schedule.labels[0][
+                                            -1
+                                        ]
+                                    )
+                                    + 1.0
+                                    + 0.0j
+                                ],
+                                [
+                                    int(
+                                        measurement_schedule.pulse_schedule.labels[0][
+                                            -1
+                                        ]
+                                    )
+                                    + 2.0
+                                    + 0.0j
+                                ],
+                            ]
+                        )
+                    ]
+                },
+                measurement_config=config,
+                sampling_period=2.0,
+            )
+            for measurement_schedule in schedules
+        ]
 
-    execution_service.run_measurement = MethodType(
-        fake_run_measurement, execution_service
-    )
-
-    result = asyncio.run(
-        execution_service.run_sweep_measurement(
-            schedule,
-            sweep_values=[0, 1],
-            config=config,
+    with _patch_measurement_schedule_runner(fake_execute_many_async):
+        result = asyncio.run(
+            execution_service.run_sweep_measurement(
+                schedule,
+                sweep_values=[0, 1],
+                config=config,
+            )
         )
-    )
 
     assert result.data["Q00"][0].shape == (2, 2)
     assert np.array_equal(
@@ -1983,34 +2089,33 @@ def test_run_sweep_measurement_resolves_default_config() -> None:
         called["create_called"] = True
         return default_config
 
-    async def fake_run_measurement(
-        self: MeasurementExecutionService,
-        *,
-        schedule: MeasurementSchedule,
-        config: MeasurementConfig,
-    ) -> MeasurementResult:
-        del self, schedule
-        called["config"] = config
-        return _make_measurement_result(
-            data={"Q00": [np.array([0.0 + 0.0j])]},
-            measurement_config=config,
-            sampling_period=2.0,
-        )
-
     execution_service.create_measurement_config = MethodType(  # type: ignore[method-assign]
         fake_create_measurement_config, execution_service
     )
-    execution_service.run_measurement = MethodType(
-        fake_run_measurement, execution_service
-    )
 
-    result = asyncio.run(
-        execution_service.run_sweep_measurement(
-            schedule,
-            sweep_values=sweep_values,
-            config=None,
+    async def fake_execute_many_async(
+        *,
+        schedules: list[MeasurementSchedule] | tuple[MeasurementSchedule, ...],
+        config: MeasurementConfig,
+    ) -> list[MeasurementResult]:
+        del schedules
+        called["config"] = config
+        return [
+            _make_measurement_result(
+                data={"Q00": [np.array([0.0 + 0.0j])]},
+                measurement_config=config,
+                sampling_period=2.0,
+            )
+        ]
+
+    with _patch_measurement_schedule_runner(fake_execute_many_async):
+        result = asyncio.run(
+            execution_service.run_sweep_measurement(
+                schedule,
+                sweep_values=sweep_values,
+                config=None,
+            )
         )
-    )
 
     assert called["create_called"] is True
     assert called["config"] is default_config
@@ -2037,27 +2142,29 @@ def test_run_sweep_measurement_stops_immediately_on_error() -> None:
             capture_schedule=CaptureSchedule(captures=[]),
         )
 
-    async def fake_run_measurement(
-        self: MeasurementExecutionService,
+    async def fake_execute_many_async(
         *,
-        schedule: MeasurementSchedule,
+        schedules: list[MeasurementSchedule] | tuple[MeasurementSchedule, ...],
         config: MeasurementConfig,
-    ) -> MeasurementResult:
-        del self, schedule, config
-        called["count"] += 1
-        if called["count"] == 2:
-            raise RuntimeError("boom")
-        return _make_measurement_result(
-            data={"Q00": [np.array([0.0 + 0.0j])]},
-            measurement_config=_make_config(mode="avg"),
-            sampling_period=2.0,
-        )
+    ) -> list[MeasurementResult]:
+        results: list[MeasurementResult] = []
+        for _measurement_schedule in schedules:
+            called["count"] += 1
+            if called["count"] == 2:
+                raise RuntimeError("boom")
+            results.append(
+                _make_measurement_result(
+                    data={"Q00": [np.array([0.0 + 0.0j])]},
+                    measurement_config=_make_config(mode="avg"),
+                    sampling_period=2.0,
+                )
+            )
+        return results
 
-    execution_service.run_measurement = MethodType(
-        fake_run_measurement, execution_service
-    )
-
-    with pytest.raises(RuntimeError, match="boom"):
+    with (
+        _patch_measurement_schedule_runner(fake_execute_many_async),
+        pytest.raises(RuntimeError, match="boom"),
+    ):
         asyncio.run(
             execution_service.run_sweep_measurement(
                 schedule,
@@ -2160,32 +2267,39 @@ def test_run_ndsweep_measurement_runs_cartesian_order_and_helpers() -> None:
             capture_schedule=CaptureSchedule(captures=[]),
         )
 
-    async def fake_run_measurement(
-        self: MeasurementExecutionService,
+    async def fake_execute_many_async(
         *,
-        schedule: MeasurementSchedule,
+        schedules: list[MeasurementSchedule] | tuple[MeasurementSchedule, ...],
         config: MeasurementConfig,
-    ) -> MeasurementResult:
-        del self
-        step = int(schedule.pulse_schedule.labels[0][-1])
-        return _make_measurement_result(
-            data={"Q00": [np.array([step + 1.0 + 0.0j])]},
-            measurement_config=config,
-            sampling_period=2.0,
-        )
+    ) -> list[MeasurementResult]:
+        return [
+            _make_measurement_result(
+                data={
+                    "Q00": [
+                        np.array(
+                            [
+                                int(measurement_schedule.pulse_schedule.labels[0][-1])
+                                + 1.0
+                                + 0.0j
+                            ]
+                        )
+                    ]
+                },
+                measurement_config=config,
+                sampling_period=2.0,
+            )
+            for measurement_schedule in schedules
+        ]
 
-    execution_service.run_measurement = MethodType(
-        fake_run_measurement, execution_service
-    )
-
-    result = asyncio.run(
-        execution_service.run_ndsweep_measurement(
-            schedule,
-            sweep_points=sweep_points,
-            sweep_axes=sweep_axes,
-            config=config,
+    with _patch_measurement_schedule_runner(fake_execute_many_async):
+        result = asyncio.run(
+            execution_service.run_ndsweep_measurement(
+                schedule,
+                sweep_points=sweep_points,
+                sweep_axes=sweep_axes,
+                config=config,
+            )
         )
-    )
 
     assert result.shape == (2, 3)
     assert result.sweep_axes == sweep_axes
@@ -2236,37 +2350,46 @@ def test_run_ndsweep_measurement_data_property_returns_flattened_pointwise_data(
             capture_schedule=CaptureSchedule(captures=[]),
         )
 
-    async def fake_run_measurement(
-        self: MeasurementExecutionService,
+    async def fake_execute_many_async(
         *,
-        schedule: MeasurementSchedule,
+        schedules: list[MeasurementSchedule] | tuple[MeasurementSchedule, ...],
         config: MeasurementConfig,
-    ) -> MeasurementResult:
-        del self
-        step = int(schedule.pulse_schedule.labels[0][-1])
-        return _make_measurement_result(
-            data={
-                "Q00": [
-                    np.array([step + 1.0 + 0.0j]),
-                    np.array([step + 11.0 + 0.0j]),
-                ]
-            },
-            measurement_config=config,
-            sampling_period=2.0,
-        )
+    ) -> list[MeasurementResult]:
+        return [
+            _make_measurement_result(
+                data={
+                    "Q00": [
+                        np.array(
+                            [
+                                int(measurement_schedule.pulse_schedule.labels[0][-1])
+                                + 1.0
+                                + 0.0j
+                            ]
+                        ),
+                        np.array(
+                            [
+                                int(measurement_schedule.pulse_schedule.labels[0][-1])
+                                + 11.0
+                                + 0.0j
+                            ]
+                        ),
+                    ]
+                },
+                measurement_config=config,
+                sampling_period=2.0,
+            )
+            for measurement_schedule in schedules
+        ]
 
-    execution_service.run_measurement = MethodType(
-        fake_run_measurement, execution_service
-    )
-
-    result = asyncio.run(
-        execution_service.run_ndsweep_measurement(
-            schedule,
-            sweep_points=sweep_points,
-            sweep_axes=("amp", "step"),
-            config=config,
+    with _patch_measurement_schedule_runner(fake_execute_many_async):
+        result = asyncio.run(
+            execution_service.run_ndsweep_measurement(
+                schedule,
+                sweep_points=sweep_points,
+                sweep_axes=("amp", "step"),
+                config=config,
+            )
         )
-    )
 
     assert set(result.data) == {"Q00"}
     assert len(result.data["Q00"]) == 2
@@ -2314,41 +2437,54 @@ def test_run_ndsweep_measurement_data_property_uses_canonical_iq_series_shape() 
             capture_schedule=CaptureSchedule(captures=[]),
         )
 
-    async def fake_run_measurement(
-        self: MeasurementExecutionService,
+    async def fake_execute_many_async(
         *,
-        schedule: MeasurementSchedule,
+        schedules: list[MeasurementSchedule] | tuple[MeasurementSchedule, ...],
         config: MeasurementConfig,
-    ) -> MeasurementResult:
-        del self
-        step = int(schedule.pulse_schedule.labels[0][-1])
-        return _make_measurement_result(
-            data={
-                "Q00": [
-                    np.array(
-                        [
-                            [step + 1.0 + 0.0j],
-                            [step + 2.0 + 0.0j],
-                        ]
-                    )
-                ]
-            },
-            measurement_config=config,
-            sampling_period=2.0,
-        )
+    ) -> list[MeasurementResult]:
+        return [
+            _make_measurement_result(
+                data={
+                    "Q00": [
+                        np.array(
+                            [
+                                [
+                                    int(
+                                        measurement_schedule.pulse_schedule.labels[0][
+                                            -1
+                                        ]
+                                    )
+                                    + 1.0
+                                    + 0.0j
+                                ],
+                                [
+                                    int(
+                                        measurement_schedule.pulse_schedule.labels[0][
+                                            -1
+                                        ]
+                                    )
+                                    + 2.0
+                                    + 0.0j
+                                ],
+                            ]
+                        )
+                    ]
+                },
+                measurement_config=config,
+                sampling_period=2.0,
+            )
+            for measurement_schedule in schedules
+        ]
 
-    execution_service.run_measurement = MethodType(
-        fake_run_measurement, execution_service
-    )
-
-    result = asyncio.run(
-        execution_service.run_ndsweep_measurement(
-            schedule,
-            sweep_points=sweep_points,
-            sweep_axes=("amp", "step"),
-            config=config,
+    with _patch_measurement_schedule_runner(fake_execute_many_async):
+        result = asyncio.run(
+            execution_service.run_ndsweep_measurement(
+                schedule,
+                sweep_points=sweep_points,
+                sweep_axes=("amp", "step"),
+                config=config,
+            )
         )
-    )
 
     assert result.data["Q00"][0].shape == (2, 2, 2)
     assert np.array_equal(
@@ -2381,30 +2517,28 @@ def test_run_ndsweep_measurement_uses_input_axis_order_by_default() -> None:
             capture_schedule=CaptureSchedule(captures=[]),
         )
 
-    async def fake_run_measurement(
-        self: MeasurementExecutionService,
+    async def fake_execute_many_async(
         *,
-        schedule: MeasurementSchedule,
+        schedules: list[MeasurementSchedule] | tuple[MeasurementSchedule, ...],
         config: MeasurementConfig,
-    ) -> MeasurementResult:
-        del self, schedule, config
-        return _make_measurement_result(
-            data={"Q00": [np.array([0.0 + 0.0j])]},
-            measurement_config=_make_config(mode="avg"),
-            sampling_period=2.0,
-        )
+    ) -> list[MeasurementResult]:
+        return [
+            _make_measurement_result(
+                data={"Q00": [np.array([0.0 + 0.0j])]},
+                measurement_config=config,
+                sampling_period=2.0,
+            )
+            for _schedule in schedules
+        ]
 
-    execution_service.run_measurement = MethodType(
-        fake_run_measurement, execution_service
-    )
-
-    result = asyncio.run(
-        execution_service.run_ndsweep_measurement(
-            schedule,
-            sweep_points=sweep_points,
-            config=config,
+    with _patch_measurement_schedule_runner(fake_execute_many_async):
+        result = asyncio.run(
+            execution_service.run_ndsweep_measurement(
+                schedule,
+                sweep_points=sweep_points,
+                config=config,
+            )
         )
-    )
 
     assert result.sweep_axes == ("z", "x")
     assert result.shape == (2, 1)

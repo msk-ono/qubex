@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Mapping
 from typing import Any, cast
 
 from qubex.backend import (
@@ -193,34 +193,23 @@ class MeasurementScheduleRunner:
         schedules: list[MeasurementSchedule] | tuple[MeasurementSchedule, ...],
         config: MeasurementConfig,
     ) -> list[MeasurementResult]:
-        """Execute multiple schedules, using backend batch APIs when available."""
-        execute_batch_async = cast(
-            Callable[..., Awaitable[list[object]]] | None,
-            getattr(self._backend_controller, "execute_batch_async", None),
-        )
-        if callable(execute_batch_async):
-            requests = [
-                self._prepare_execution(
-                    schedule=schedule,
-                    config=config,
-                )
-                for schedule in schedules
-            ]
-            backend_results = await execute_batch_async(requests=requests)
-            return [
-                self._build_result(
-                    backend_result=backend_result,
-                    config=config,
-                )
-                for backend_result in backend_results
-            ]
-
-        return [
-            await self.execute_async(
+        """Execute multiple schedules through the backend batch contract."""
+        requests = [
+            self._prepare_execution(
                 schedule=schedule,
                 config=config,
             )
             for schedule in schedules
+        ]
+        backend_results = await self._backend_controller.execute_batch_async(
+            requests=requests
+        )
+        return [
+            self._build_result(
+                backend_result=backend_result,
+                config=config,
+            )
+            for backend_result in backend_results
         ]
 
     def _prepare_execution(
