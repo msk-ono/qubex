@@ -85,6 +85,51 @@ def test_execution_manager_parallel_path_wraps_engine_result(monkeypatch) -> Non
     assert called["system"] is controller.quel1system
 
 
+def test_execute_batch_async_falls_back_to_sequential_execute_async(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Given batch requests, execute_batch_async should await execute_async for each request in order."""
+    controller = Quel1BackendController()
+    request_a = BackendExecutionRequest(payload=object())
+    request_b = BackendExecutionRequest(payload=object())
+    result_a = Quel1BackendExecutionResult(status={"A": "OK"}, data={}, config={})
+    result_b = Quel1BackendExecutionResult(status={"B": "OK"}, data={}, config={})
+    calls: list[dict[str, object]] = []
+
+    async def _fake_execute_async(**kwargs: object) -> Quel1BackendExecutionResult:
+        calls.append(dict(kwargs))
+        request = cast(BackendExecutionRequest, kwargs["request"])
+        if request is request_a:
+            return result_a
+        if request is request_b:
+            return result_b
+        raise AssertionError("unexpected request")
+
+    monkeypatch.setattr(controller, "execute_async", _fake_execute_async)
+
+    results = asyncio.run(
+        controller.execute_batch_async(
+            requests=[request_a, request_b],
+            execution_mode="parallel",
+            clock_health_checks=True,
+        )
+    )
+
+    assert results == [result_a, result_b]
+    assert calls == [
+        {
+            "request": request_a,
+            "execution_mode": "parallel",
+            "clock_health_checks": True,
+        },
+        {
+            "request": request_b,
+            "execution_mode": "parallel",
+            "clock_health_checks": True,
+        },
+    ]
+
+
 def test_initialize_awg_and_capunits_parallel_calls_each_box(monkeypatch) -> None:
     """Given parallel init, when initializing boxes, then each box is processed once."""
     controller = Quel1BackendController()
