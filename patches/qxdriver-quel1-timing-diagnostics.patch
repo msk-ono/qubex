@@ -1,0 +1,372 @@
+diff --git a/packages/qxdriver-quel1/src/qxdriver_quel1/driver/timing_diagnostics.py b/packages/qxdriver-quel1/src/qxdriver_quel1/driver/timing_diagnostics.py
+new file mode 100644
+index 00000000..4b02df74
+--- /dev/null
++++ b/packages/qxdriver-quel1/src/qxdriver_quel1/driver/timing_diagnostics.py
+@@ -0,0 +1,139 @@
++"""Opt-in timing diagnostics for QuEL-1 direct-driver actions."""
++
++from __future__ import annotations
++
++import os
++import time
++from collections.abc import Callable
++from logging import Logger
++from typing import Any, TypeVar
++
++_DIAGNOSTICS_ENV = "QXDRIVER_QUEL1_TIMING_DIAGNOSTICS"
++_FALLBACK_TICK_SECONDS = 8e-9
++
++T = TypeVar("T")
++
++
++def diagnostics_enabled() -> bool:
++    """Return True when QuEL-1 timing diagnostics are enabled."""
++    value = os.getenv(_DIAGNOSTICS_ENV, "")
++    return value.strip().lower() in {"1", "true", "yes", "on"}
++
++
++def _read_current_timecounter(box: Any) -> tuple[int | None, str | None]:
++    reader = getattr(box, "get_current_timecounter", None)
++    if reader is None:
++        return None, "box has no get_current_timecounter"
++    try:
++        return int(reader()), None
++    except Exception as exc:  # pragma: no cover - diagnostics only
++        return None, f"{type(exc).__name__}: {exc}"
++
++
++def _timecounter_delta_ms(box: Any, delta: int) -> float:
++    wss = getattr(box, "wss", None)
++    converter = getattr(wss, "timecounter_to_second", None)
++    if converter is not None:
++        try:
++            return float(converter(delta)) * 1000.0
++        except Exception:  # pragma: no cover - diagnostics fallback
++            pass
++    return delta * _FALLBACK_TICK_SECONDS * 1000.0
++
++
++def _format_value(value: Any) -> str:
++    if isinstance(value, float):
++        return f"{value:.3f}"
++    if isinstance(value, int | str | bool):
++        return str(value)
++    return repr(value)
++
++
++def log_timing_event(
++    logger: Logger,
++    event: str,
++    *,
++    box: Any | None = None,
++    box_name: str | None = None,
++    timecounter: int | None = None,
++    elapsed_ms: float | None = None,
++    **fields: Any,
++) -> None:
++    """Log one timing diagnostic event when diagnostics are enabled."""
++    if not diagnostics_enabled():
++        return
++
++    current_timecounter = None
++    current_error = None
++    remaining_ms = None
++    if box is not None and timecounter is not None:
++        current_timecounter, current_error = _read_current_timecounter(box)
++        if current_timecounter is not None:
++            remaining_ms = _timecounter_delta_ms(
++                box,
++                timecounter - current_timecounter,
++            )
++
++    parts = ["qxdriver_quel1_timing", f"event={event}"]
++    if box_name is not None:
++        parts.append(f"box={box_name}")
++    if elapsed_ms is not None:
++        parts.append(f"elapsed_ms={elapsed_ms:.3f}")
++    if timecounter is not None:
++        parts.append(f"timecounter={timecounter}")
++    if current_timecounter is not None:
++        parts.append(f"current_timecounter={current_timecounter}")
++    if remaining_ms is not None:
++        parts.append(f"remaining_ms={remaining_ms:.3f}")
++    if current_error is not None:
++        parts.append(f"current_timecounter_error={current_error!r}")
++    for key in sorted(fields):
++        value = fields[key]
++        if value is not None:
++            parts.append(f"{key}={_format_value(value)}")
++
++    logger.info(" ".join(parts))
++
++
++def timed_call(
++    logger: Logger,
++    event: str,
++    call: Callable[[], T],
++    *,
++    box: Any | None = None,
++    box_name: str | None = None,
++    timecounter: int | None = None,
++    **fields: Any,
++) -> T:
++    """Run a call and log elapsed wall-clock time when diagnostics are enabled."""
++    if not diagnostics_enabled():
++        return call()
++
++    log_timing_event(logger, event, box=box, box_name=box_name, timecounter=timecounter, phase="start", **fields)
++    started = time.perf_counter()
++    try:
++        result = call()
++    except Exception as exc:
++        log_timing_event(
++            logger,
++            event,
++            box=box,
++            box_name=box_name,
++            timecounter=timecounter,
++            elapsed_ms=(time.perf_counter() - started) * 1000.0,
++            phase="error",
++            error=f"{type(exc).__name__}: {exc}",
++            **fields,
++        )
++        raise
++    log_timing_event(
++        logger,
++        event,
++        box=box,
++        box_name=box_name,
++        timecounter=timecounter,
++        elapsed_ms=(time.perf_counter() - started) * 1000.0,
++        phase="end",
++        **fields,
++    )
++    return result
+diff --git a/packages/qxdriver-quel1/src/qxdriver_quel1/driver/multi.py b/packages/qxdriver-quel1/src/qxdriver_quel1/driver/multi.py
+index 036b078b..dc9b8bb3 100644
+--- a/packages/qxdriver-quel1/src/qxdriver_quel1/driver/multi.py
++++ b/packages/qxdriver-quel1/src/qxdriver_quel1/driver/multi.py
+@@ -22,6 +22,7 @@ from qxdriver_quel1.clockmaster.compat import (
+ 
+ from . import single
+ from .single import Quel1PortType
++from .timing_diagnostics import log_timing_event, timed_call
+ 
+ logger = getLogger(__name__)
+ 
+@@ -555,8 +556,32 @@ class Action:
+             name: str,
+             action: single.Action,
+         ) -> dict[single.CaptureFutureKey, Any]:
+-            if scheduled_times is not None and action.trigger_settings:
+-                return action.capture_start(timecounter=scheduled_times[name])
++            scheduled_time = (
++                scheduled_times[name]
++                if scheduled_times is not None and action.trigger_settings
++                else None
++            )
++            if scheduled_time is not None:
++                return timed_call(
++                    logger,
++                    "multi.capture_start.box",
++                    lambda: action.capture_start(timecounter=scheduled_time),
++                    box=action.box,
++                    box_name=name,
++                    timecounter=scheduled_time,
++                    awg_count=len(action.wave_sequences),
++                    capture_count=len(action.capture_params),
++                    trigger_count=len(action.trigger_settings),
++                )
++            return timed_call(
++                logger,
++                "multi.capture_start.box",
++                action.capture_start,
++                box=action.box,
++                box_name=name,
++                awg_count=len(action.wave_sequences),
++                capture_count=len(action.capture_params),
++                trigger_count=len(action.trigger_settings),
++            )
+-            return action.capture_start()
+ 
+         return {
+@@ -633,15 +660,50 @@ class Action:
+         `single.Action.capture_start(...)`, while `emit_at()` only reserves
+         emission for boxes that have AWG settings without trigger settings.
+         """
+-        scheduled_times = self._build_scheduled_times(
+-            displacement=self._quel1system.displacement
++        reference_box = self._quel1system.box[self._reference_box_name]
++        scheduled_times = timed_call(
++            logger,
++            "multi.build_scheduled_times",
++            lambda: self._build_scheduled_times(
++                displacement=self._quel1system.displacement,
++            ),
++            box=reference_box,
++            box_name=self._reference_box_name,
+         )
+-        futures = self.capture_start(scheduled_times=scheduled_times)
+-        self.emit_at(
+-            displacement=self._quel1system.displacement,
+-            scheduled_times=scheduled_times,
++        log_timing_event(
++            logger,
++            "multi.scheduled_times",
++            box=reference_box,
++            box_name=self._reference_box_name,
++            timecounter=scheduled_times[self._reference_box_name],
++            scheduled_times=scheduled_times,
++        )
++        futures = timed_call(
++            logger,
++            "multi.capture_start.all",
++            lambda: self.capture_start(scheduled_times=scheduled_times),
++            box=reference_box,
++            box_name=self._reference_box_name,
++            timecounter=scheduled_times[self._reference_box_name],
++            box_count=len(scheduled_times),
++        )
++        timed_call(
++            logger,
++            "multi.emit_at.all",
++            lambda: self.emit_at(
++                displacement=self._quel1system.displacement,
++                scheduled_times=scheduled_times,
++            ),
++            box=reference_box,
++            box_name=self._reference_box_name,
++            timecounter=scheduled_times[self._reference_box_name],
++            box_count=len(scheduled_times),
+         )
+-        return self.capture_stop(futures)
++        return timed_call(
++            logger,
++            "multi.capture_stop.all",
++            lambda: self.capture_stop(futures),
++        )
+ 
+     def _build_scheduled_times(
+         self,
+@@ -726,13 +784,23 @@ class Action:
+             )
+         )
+-        tasks = []
++        tasks = []
+         for name, action in self._actions.items():
+             if action.trigger_settings or not action.wave_sequences:
+                 continue
+             scheduled_time = resolved_scheduled_times[name]
+-            tasks.append(
+-                action.box.start_wavegen(awgs[name], timecounter=scheduled_time)
++            task = timed_call(
++                logger,
++                "multi.emit_at.start_wavegen",
++                lambda: action.box.start_wavegen(
++                    awgs[name],
++                    timecounter=scheduled_time,
++                ),
++                box=action.box,
++                box_name=name,
++                timecounter=scheduled_time,
++                awg_count=len(awgs[name]),
+             )
++            tasks.append((name, action, scheduled_time, task))
+             logger.info(
+                 "reserving emission of %s at %s : base_time=%s, timediff=%s, timing_shift=%s",
+                 name,
+@@ -744,4 +819,12 @@ class Action:
+                 self._quel1system.timing_shift[name],
+             )
+-        for task in tasks:
+-            task.result()
++        for name, action, scheduled_time, task in tasks:
++            timed_call(
++                logger,
++                "multi.emit_at.wavegen_task_result",
++                task.result,
++                box=action.box,
++                box_name=name,
++                timecounter=scheduled_time,
++                awg_count=len(awgs[name]),
++            )
+diff --git a/packages/qxdriver-quel1/src/qxdriver_quel1/driver/single.py b/packages/qxdriver-quel1/src/qxdriver_quel1/driver/single.py
+index 495eeef0..efb5330b 100644
+--- a/packages/qxdriver-quel1/src/qxdriver_quel1/driver/single.py
++++ b/packages/qxdriver-quel1/src/qxdriver_quel1/driver/single.py
+@@ -3,6 +3,7 @@
+ from __future__ import annotations
+ 
+ from collections import defaultdict
++from logging import getLogger
+ from types import MappingProxyType
+ from typing import Any, Final, Literal, NamedTuple, TypeAlias, cast
+ 
+@@ -15,11 +16,14 @@ from qxdriver_quel1.e7awg.compat import CaptureParam, WaveSequence
+ 
+ from .compat import convert_captureparam, convert_wavesequence, reader_to_flat_wave
++from .timing_diagnostics import timed_call
+ 
+ Quel1PortType: TypeAlias = int | tuple[int, int]
+ _TriggeredCaptureKey: TypeAlias = Literal["__triggered__"]
+ CaptureFutureKey: TypeAlias = Quel1PortType | _TriggeredCaptureKey
+ _TRIGGERED_CAPTURE_KEY: Final[_TriggeredCaptureKey] = "__triggered__"
+ 
++logger = getLogger(__name__)
++
+ 
+ class AwgId(NamedTuple):
+     """AWG identifier within a box."""
+@@ -254,17 +258,24 @@ class Action:
+                 for port, runits_ in runits_by_ports.items()
+                 for runit in runits_
+             }
+-            if timecounter is None:
+-                cap_task, gen_task = self._box.start_capture_by_awg_trigger(
+-                    runits=runits,
+-                    channels=channel_specs,
+-                )
+-            else:
+-                cap_task, gen_task = self._box.start_capture_by_awg_trigger(
+-                    runits=runits,
+-                    channels=channel_specs,
+-                    timecounter=timecounter,
++            cap_task, gen_task = timed_call(
++                logger,
++                "single.start_capture_by_awg_trigger",
++                lambda: self._box.start_capture_by_awg_trigger(
++                    runits=runits,
++                    channels=channel_specs,
++                    **(
++                        {"timecounter": timecounter}
++                        if timecounter is not None
++                        else {}
++                    ),
+-                )
++                ),
++                box=self._box,
++                timecounter=timecounter,
++                awg_count=len(channel_specs),
++                capture_count=len(runits),
++                trigger_count=len(self._triggers),
++            )
+             return {_TRIGGERED_CAPTURE_KEY: (cap_task, gen_task)}
+ 
+         return {
+@@ -304,7 +316,14 @@ class Action:
+         triggered_futures = futures.get(_TRIGGERED_CAPTURE_KEY)
+         if triggered_futures is not None:
+             cap_task, gen_task = cast(tuple[Any, Any], triggered_futures)
+-            gen_task.result()
++            timed_call(
++                logger,
++                "single.capture_stop.gen_task_result",
++                gen_task.result,
++                box=self._box,
++                timecounter=getattr(gen_task, "_timecount", None),
++                trigger_count=len(self._triggers),
++            )
+             readers = cap_task.result()
+             for (port, runit), reader in readers.items():
+                 status[port] = CaptureReturnCode.SUCCESS
