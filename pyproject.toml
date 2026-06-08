@@ -46,7 +46,7 @@ dependencies = [
 
 [project.optional-dependencies]
 backend = ["qxdriver-quel1 == 1.5.0b4"]
-quel1 = ["qxdriver-quel1 == 1.5.0b4"]
+quel1 = ["qxdriver-quel1 == 1.5.0b4", "quel_ic_config >= 0.10, < 0.11"]
 quel3 = ["quelware-client"]
 
 [project.scripts]
@@ -83,6 +83,7 @@ cache-dir = ".cache/uv"
 [tool.uv.sources]
 quelware_client = { workspace = true }
 qxdriver_quel1 = { workspace = true }
+quel_ic_config = { workspace = true }
 qxcore = { workspace = true }
 qxfitting = { workspace = true }
 qxpulse = { workspace = true }
@@ -95,6 +96,7 @@ members = [
     "packages/quelware-client/quelware-client",
     "packages/qxcore",
     "packages/qxdriver-quel1",
+    "packages/quelware/quel_ic_config",
     "packages/qxfitting",
     "packages/qxpulse",
     "packages/qxschema",
