@@ -366,3 +366,397 @@ index ca23b14..f2ec599 100644
  
      def initialize_capunits(self, capunit_idxs: Collection[tuple[int, int]]):
          for i in capunit_idxs:
+diff --git a/packages/quelware/quel_ic_config/src/quel_ic_config/quel1_box.py b/packages/quelware/quel_ic_config/src/quel_ic_config/quel1_box.py
+--- a/packages/quelware/quel_ic_config/src/quel_ic_config/quel1_box.py
++++ b/packages/quelware/quel_ic_config/src/quel_ic_config/quel1_box.py
+@@ -2,5 +2,6 @@ import collections.abc
+ import copy
+ import json
+ import logging
++import time
+ from pathlib import Path
+ from typing import Any, Collection, Dict, Final, Optional, Set, Tuple, Union, cast
+@@ -22,4 +23,5 @@ from quel_ic_config.quel1_wave_subsystem import (
+     StartCapunitsByTriggerTask,
+     StartCapunitsNowTask,
+ )
++from quel_ic_config.timing_diagnostics import log_timing_event, timed_call
+ from quel_ic_config.quel_config_common import Quel1ConfigOption, Quel1Feature
+@@ -1351,26 +1353,125 @@ class Quel1Box:
+-        mapping: dict[tuple[int, int], tuple[Quel1PortType, int]] = {}
+-        capmod_idxs: set[int] = set()
+-        for port, runit in runits:
+-            gr, rl = self._convert_input_port(port)
+-            cu = self._dev._get_capunit_from_runit(gr, rl, runit)
+-            mapping[cu] = (port, runit)
+-            capmod_idxs.add(cu[0])
+-
+-        # Notes: any channel is fine since they all will start at the same time.
+-        trigger_idx = self._dev._get_awg_from_channel(*self._convert_output_channel(list(channels)[0]))
+-        for capmod_idx in capmod_idxs:
+-            self.wss.set_triggering_awg_to_line(capmod_idx, trigger_idx)
+-
+-        capunit_idxs = set(mapping.keys())
+-        cap_task = BoxStartCapunitsByTriggerTask(
+-            self.wss.start_capunits_by_trigger(
+-                capunit_idxs,
+-                timeout_before_trigger=timeout_before_trigger,
+-                timeout_after_trigger=timeout_after_trigger,
+-                polling_period=polling_period,
+-                disable_timeout=disable_timeout,
+-            ),
+-            mapping,
+-        )
++        clkctrl = self.wss.hal.clkcntr
++        common_fields = {
++            "box_name": self.name,
++            "channel_count": len(channels),
++            "runit_count": len(runits),
++        }
++        started = time.perf_counter()
++        log_timing_event(
++            logger,
++            "box.start_capture_by_awg_trigger.all",
++            clkctrl=clkctrl,
++            timecounter=timecounter,
++            phase="start",
++            **common_fields,
++        )
++        capmod_count: int | None = None
++        capunit_count: int | None = None
++        trigger_idx: int | None = None
++        try:
++            def _map_runits():
++                mapping: dict[tuple[int, int], tuple[Quel1PortType, int]] = {}
++                capmod_idxs_: set[int] = set()
++                for port, runit in runits:
++                    gr, rl = self._convert_input_port(port)
++                    cu = self._dev._get_capunit_from_runit(gr, rl, runit)
++                    mapping[cu] = (port, runit)
++                    capmod_idxs_.add(cu[0])
++                return mapping, capmod_idxs_
++
++            mapping, capmod_idxs = timed_call(
++                logger,
++                "box.start_capture_by_awg_trigger.map_runits",
++                _map_runits,
++                clkctrl=clkctrl,
++                timecounter=timecounter,
++                **common_fields,
++            )
++            capmod_count = len(capmod_idxs)
++
++            # Notes: any channel is fine since they all will start at the same time.
++            trigger_idx = timed_call(
++                logger,
++                "box.start_capture_by_awg_trigger.resolve_trigger",
++                lambda: self._dev._get_awg_from_channel(*self._convert_output_channel(list(channels)[0])),
++                clkctrl=clkctrl,
++                timecounter=timecounter,
++                capmod_count=len(capmod_idxs),
++                **common_fields,
++            )
++
++            def _set_triggering_awg_to_line() -> None:
++                for capmod_idx in capmod_idxs:
++                    self.wss.set_triggering_awg_to_line(capmod_idx, trigger_idx)
++
++            timed_call(
++                logger,
++                "box.start_capture_by_awg_trigger.set_triggering_awg_to_line",
++                _set_triggering_awg_to_line,
++                clkctrl=clkctrl,
++                timecounter=timecounter,
++                capmod_count=capmod_count,
++                trigger_idx=trigger_idx,
++                **common_fields,
++            )
++
++            capunit_idxs = set(mapping.keys())
++            capunit_count = len(capunit_idxs)
++            start_capunits_task = timed_call(
++                logger,
++                "box.start_capture_by_awg_trigger.start_capunits_by_trigger",
++                lambda: self.wss.start_capunits_by_trigger(
++                    capunit_idxs,
++                    timeout_before_trigger=timeout_before_trigger,
++                    timeout_after_trigger=timeout_after_trigger,
++                    polling_period=polling_period,
++                    disable_timeout=disable_timeout,
++                ),
++                clkctrl=clkctrl,
++                timecounter=timecounter,
++                capunit_count=capunit_count,
++                timeout_after_trigger=timeout_after_trigger,
++                timeout_before_trigger=timeout_before_trigger,
++                **common_fields,
++            )
++            cap_task = BoxStartCapunitsByTriggerTask(
++                start_capunits_task,
++                mapping,
++            )
++            gen_task = timed_call(
++                logger,
++                "box.start_capture_by_awg_trigger.start_wavegen",
++                lambda: self.start_wavegen(channels, timecounter, polling_period=polling_period),
++                clkctrl=clkctrl,
++                timecounter=timecounter,
++                awg_count=len(channels),
++                **common_fields,
++            )
++        except Exception as exc:
++            log_timing_event(
++                logger,
++                "box.start_capture_by_awg_trigger.all",
++                clkctrl=clkctrl,
++                timecounter=timecounter,
++                elapsed_ms=(time.perf_counter() - started) * 1000.0,
++                phase="error",
++                capmod_count=capmod_count,
++                capunit_count=capunit_count,
++                error=f"{type(exc).__name__}: {exc}",
++                trigger_idx=trigger_idx,
++                **common_fields,
++            )
++            raise
++        log_timing_event(
++            logger,
++            "box.start_capture_by_awg_trigger.all",
++            clkctrl=clkctrl,
++            timecounter=timecounter,
++            elapsed_ms=(time.perf_counter() - started) * 1000.0,
++            phase="end",
++            capmod_count=capmod_count,
++            capunit_count=capunit_count,
++            trigger_idx=trigger_idx,
++            **common_fields,
++        )
+-        gen_task: AbstractStartAwgunitsTask = self.start_wavegen(channels, timecounter, polling_period=polling_period)
+         return cap_task, gen_task
+diff --git a/packages/quelware/quel_ic_config/src/quel_ic_config/quel1_box_intrinsic.py b/packages/quelware/quel_ic_config/src/quel_ic_config/quel1_box_intrinsic.py
+--- a/packages/quelware/quel_ic_config/src/quel_ic_config/quel1_box_intrinsic.py
++++ b/packages/quelware/quel_ic_config/src/quel_ic_config/quel1_box_intrinsic.py
+@@ -50,2 +50,3 @@ from quel_ic_config.quel1se_riken8_config_subsystem import (
+ )
++from quel_ic_config.timing_diagnostics import log_timing_event, timed_call
+ from quel_ic_config.quel_config_common import Quel1ConfigOption, Quel1Feature
+@@ -1352,37 +1353,183 @@ class Quel1BoxIntrinsic:
+-        mapping: dict[tuple[int, int], tuple[int, str, int]] = {}
+-        capmod_idxs: set[int] = set()
+-        for ru in runits:
+-            cu = self._get_capunit_from_runit(*ru)
+-            mapping[cu] = ru
+-            capmod_idxs.add(cu[0])
+-
+-        # Notes: any channel is fine since they all will start at the same time.
+-        trigger_idx = self._get_awg_from_channel(*list(channels)[0])
+-        for capmod_idx in capmod_idxs:
+-            self.wss.set_triggering_awg_to_line(capmod_idx, trigger_idx)
+-
+-        if timecounter:
+-            cur = self.wss.get_current_timecounter()
+-            delta = self.wss.timecounter_to_second(timecounter - cur)
+-            if delta < StartAwgunitsTimedTask._TRIGGER_SETTABLE_MARGIN:
+-                raise RuntimeError(f"cannot schedule at the past or too close timecounter (= {timecounter})")
+-            if timeout_before_trigger is None:
+-                timeout_before_trigger = delta + StartAwgunitsTimedTask._START_TIMEOUT_MARGIN
+-        else:
+-            if timeout_before_trigger is None:
+-                timeout_before_trigger = StartAwgunitsNowTask._START_TIMEOUT
+-
+-        capunit_idxs = set(mapping.keys())
+-        cap_task = BoxIntrinsicStartCapunitsByTriggerTask(
+-            self.wss.start_capunits_by_trigger(
+-                capunit_idxs,
+-                timeout_before_trigger=timeout_before_trigger,
+-                timeout_after_trigger=timeout_after_trigger,
+-                polling_period=polling_period,
+-                disable_timeout=disable_timeout,
+-            ),
+-            mapping,
+-        )
++        clkctrl = self.wss.hal.clkcntr
++        common_fields = {
++            "box_repr": repr(self),
++            "channel_count": len(channels),
++            "runit_count": len(runits),
++        }
++        started = time.perf_counter()
++        log_timing_event(
++            logger,
++            "box.start_capture_by_awg_trigger.all",
++            clkctrl=clkctrl,
++            timecounter=timecounter,
++            phase="start",
++            **common_fields,
++        )
++        capmod_count: int | None = None
++        capunit_count: int | None = None
++        trigger_idx: int | None = None
++        current_timecounter: int | None = None
++        try:
++            def _map_runits():
++                mapping: dict[tuple[int, int], tuple[int, str, int]] = {}
++                capmod_idxs_: set[int] = set()
++                for ru in runits:
++                    cu = self._get_capunit_from_runit(*ru)
++                    mapping[cu] = ru
++                    capmod_idxs_.add(cu[0])
++                return mapping, capmod_idxs_
++
++            mapping, capmod_idxs = timed_call(
++                logger,
++                "box.start_capture_by_awg_trigger.map_runits",
++                _map_runits,
++                clkctrl=clkctrl,
++                timecounter=timecounter,
++                **common_fields,
++            )
++            capmod_count = len(capmod_idxs)
++
++            # Notes: any channel is fine since they all will start at the same time.
++            trigger_idx = timed_call(
++                logger,
++                "box.start_capture_by_awg_trigger.resolve_trigger",
++                lambda: self._get_awg_from_channel(*list(channels)[0]),
++                clkctrl=clkctrl,
++                timecounter=timecounter,
++                capmod_count=len(capmod_idxs),
++                **common_fields,
++            )
++
++            def _set_triggering_awg_to_line() -> None:
++                for capmod_idx in capmod_idxs:
++                    self.wss.set_triggering_awg_to_line(capmod_idx, trigger_idx)
++
++            timed_call(
++                logger,
++                "box.start_capture_by_awg_trigger.set_triggering_awg_to_line",
++                _set_triggering_awg_to_line,
++                clkctrl=clkctrl,
++                timecounter=timecounter,
++                capmod_count=capmod_count,
++                trigger_idx=trigger_idx,
++                **common_fields,
++            )
++
++            if timecounter:
++                current_timecounter = timed_call(
++                    logger,
++                    "box.start_capture_by_awg_trigger.get_current_timecounter",
++                    self.wss.get_current_timecounter,
++                    clkctrl=clkctrl,
++                    timecounter=timecounter,
++                    **common_fields,
++                )
++                delta = self.wss.timecounter_to_second(timecounter - current_timecounter)
++                log_timing_event(
++                    logger,
++                    "box.start_capture_by_awg_trigger.timeout_config",
++                    clkctrl=clkctrl,
++                    timecounter=timecounter,
++                    current_timecounter=current_timecounter,
++                    delta_ms=delta * 1000.0,
++                    margin_ms=StartAwgunitsTimedTask._TRIGGER_SETTABLE_MARGIN * 1000.0,
++                    phase="computed",
++                    timeout_before_trigger=timeout_before_trigger,
++                    **common_fields,
++                )
++                if delta < StartAwgunitsTimedTask._TRIGGER_SETTABLE_MARGIN:
++                    log_timing_event(
++                        logger,
++                        "box.start_capture_by_awg_trigger.timeout_config",
++                        clkctrl=clkctrl,
++                        timecounter=timecounter,
++                        current_timecounter=current_timecounter,
++                        delta_ms=delta * 1000.0,
++                        margin_ms=StartAwgunitsTimedTask._TRIGGER_SETTABLE_MARGIN * 1000.0,
++                        phase="too_late",
++                        timeout_before_trigger=timeout_before_trigger,
++                        **common_fields,
++                    )
++                    raise RuntimeError(f"cannot schedule at the past or too close timecounter (= {timecounter})")
++                if timeout_before_trigger is None:
++                    timeout_before_trigger = delta + StartAwgunitsTimedTask._START_TIMEOUT_MARGIN
++            else:
++                if timeout_before_trigger is None:
++                    timeout_before_trigger = StartAwgunitsNowTask._START_TIMEOUT
++            log_timing_event(
++                logger,
++                "box.start_capture_by_awg_trigger.timeout_config",
++                clkctrl=clkctrl,
++                timecounter=timecounter,
++                current_timecounter=current_timecounter,
++                phase="end",
++                timeout_after_trigger=timeout_after_trigger,
++                timeout_before_trigger=timeout_before_trigger,
++                **common_fields,
++            )
++
++            capunit_idxs = set(mapping.keys())
++            capunit_count = len(capunit_idxs)
++            start_capunits_task = timed_call(
++                logger,
++                "box.start_capture_by_awg_trigger.start_capunits_by_trigger",
++                lambda: self.wss.start_capunits_by_trigger(
++                    capunit_idxs,
++                    timeout_before_trigger=timeout_before_trigger,
++                    timeout_after_trigger=timeout_after_trigger,
++                    polling_period=polling_period,
++                    disable_timeout=disable_timeout,
++                ),
++                clkctrl=clkctrl,
++                timecounter=timecounter,
++                current_timecounter=current_timecounter,
++                capunit_count=capunit_count,
++                timeout_after_trigger=timeout_after_trigger,
++                timeout_before_trigger=timeout_before_trigger,
++                **common_fields,
++            )
++            cap_task = BoxIntrinsicStartCapunitsByTriggerTask(
++                start_capunits_task,
++                mapping,
++            )
++
++            gen_task: AbstractStartAwgunitsTask = timed_call(
++                logger,
++                "box.start_capture_by_awg_trigger.start_wavegen",
++                lambda: self.start_wavegen(channels, timecounter, polling_period=polling_period),
++                clkctrl=clkctrl,
++                timecounter=timecounter,
++                current_timecounter=current_timecounter,
++                awg_count=len(channels),
++                **common_fields,
++            )
++        except Exception as exc:
++            log_timing_event(
++                logger,
++                "box.start_capture_by_awg_trigger.all",
++                clkctrl=clkctrl,
++                timecounter=timecounter,
++                current_timecounter=current_timecounter,
++                elapsed_ms=(time.perf_counter() - started) * 1000.0,
++                phase="error",
++                capmod_count=capmod_count,
++                capunit_count=capunit_count,
++                error=f"{type(exc).__name__}: {exc}",
++                trigger_idx=trigger_idx,
++                **common_fields,
++            )
++            raise
++        log_timing_event(
++            logger,
++            "box.start_capture_by_awg_trigger.all",
++            clkctrl=clkctrl,
++            timecounter=timecounter,
++            current_timecounter=current_timecounter,
++            elapsed_ms=(time.perf_counter() - started) * 1000.0,
++            phase="end",
++            capmod_count=capmod_count,
++            capunit_count=capunit_count,
++            trigger_idx=trigger_idx,
++            **common_fields,
++        )
+-
+-        gen_task: AbstractStartAwgunitsTask = self.start_wavegen(channels, timecounter, polling_period=polling_period)
+         return cap_task, gen_task

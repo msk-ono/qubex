@@ -411,6 +411,17 @@ def _box_float_map(
     return values
 
 
+def _record_box_key(record: TimingRecord) -> str | None:
+    """Return the best available box identifier for one record."""
+    if record.box is not None:
+        return record.box
+    for key in ("box_name", "box_repr"):
+        value = record.fields.get(key)
+        if value is not None:
+            return str(value)
+    return None
+
+
 def _action_counts(records: Sequence[TimingRecord]) -> tuple[int | None, int | None]:
     """Return awg and capture counts for one action."""
     record = _first_record(records, "qubex.multi.capture_start.box", "start")
@@ -578,6 +589,48 @@ def _metric_stats(records: Sequence[TimingRecord]) -> dict[str, MetricStats]:
             "end",
             "elapsed_ms",
         ),
+        "box.start_capture all elapsed": _field_values(
+            records,
+            "box.start_capture_by_awg_trigger.all",
+            "end",
+            "elapsed_ms",
+        ),
+        "box.start_capture map_runits elapsed": _field_values(
+            records,
+            "box.start_capture_by_awg_trigger.map_runits",
+            "end",
+            "elapsed_ms",
+        ),
+        "box.start_capture resolve_trigger elapsed": _field_values(
+            records,
+            "box.start_capture_by_awg_trigger.resolve_trigger",
+            "end",
+            "elapsed_ms",
+        ),
+        "box.start_capture set_trigger elapsed": _field_values(
+            records,
+            "box.start_capture_by_awg_trigger.set_triggering_awg_to_line",
+            "end",
+            "elapsed_ms",
+        ),
+        "box.start_capture get_counter elapsed": _field_values(
+            records,
+            "box.start_capture_by_awg_trigger.get_current_timecounter",
+            "end",
+            "elapsed_ms",
+        ),
+        "box.start_capture start_capunits elapsed": _field_values(
+            records,
+            "box.start_capture_by_awg_trigger.start_capunits_by_trigger",
+            "end",
+            "elapsed_ms",
+        ),
+        "box.start_capture start_wavegen elapsed": _field_values(
+            records,
+            "box.start_capture_by_awg_trigger.start_wavegen",
+            "end",
+            "elapsed_ms",
+        ),
         "wave.start_awgunits_timed elapsed": _field_values(
             records,
             "wave.start_awgunits_timed",
@@ -659,8 +712,18 @@ def _record_detail(record: TimingRecord) -> str:
         "remaining_ms_at_check",
         "margin_ms",
         "queue_wait_ms",
+        "box_name",
+        "box_repr",
         "awg_count",
         "capture_count",
+        "channel_count",
+        "runit_count",
+        "capmod_count",
+        "capunit_count",
+        "trigger_idx",
+        "delta_ms",
+        "timeout_before_trigger",
+        "timeout_after_trigger",
         "awgunit_count",
         "awgunits",
         "dest",
@@ -689,6 +752,14 @@ def _worst_records(
     categories: dict[str, list[WorstRecord]] = {
         "capture_start queue_wait": [],
         "capture_start box elapsed": [],
+        "single minus box.start_capture all": [],
+        "box.start_capture all elapsed": [],
+        "box.start_capture map_runits elapsed": [],
+        "box.start_capture resolve_trigger elapsed": [],
+        "box.start_capture set_trigger elapsed": [],
+        "box.start_capture get_counter elapsed": [],
+        "box.start_capture start_capunits elapsed": [],
+        "box.start_capture start_wavegen elapsed": [],
         "wave task body elapsed": [],
         "read_counter elapsed": [],
         "e7 simple32 elapsed": [],
@@ -734,6 +805,110 @@ def _worst_records(
             "end",
         ):
             add("capture_start box elapsed", action_index, record, "elapsed_ms")
+        box_start_records = _records_matching(
+            segment,
+            "box.start_capture_by_awg_trigger.all",
+            "end",
+        )
+        box_start_elapsed_by_box = {
+            box_key: elapsed
+            for record in box_start_records
+            if (box_key := _record_box_key(record)) is not None
+            and (elapsed := _to_float(record.fields.get("elapsed_ms"))) is not None
+        }
+        for record in box_start_records:
+            add("box.start_capture all elapsed", action_index, record, "elapsed_ms")
+        for record in _records_matching(
+            segment,
+            "box.start_capture_by_awg_trigger.map_runits",
+            "end",
+        ):
+            add(
+                "box.start_capture map_runits elapsed",
+                action_index,
+                record,
+                "elapsed_ms",
+            )
+        for record in _records_matching(
+            segment,
+            "box.start_capture_by_awg_trigger.resolve_trigger",
+            "end",
+        ):
+            add(
+                "box.start_capture resolve_trigger elapsed",
+                action_index,
+                record,
+                "elapsed_ms",
+            )
+        for record in _records_matching(
+            segment,
+            "box.start_capture_by_awg_trigger.set_triggering_awg_to_line",
+            "end",
+        ):
+            add(
+                "box.start_capture set_trigger elapsed",
+                action_index,
+                record,
+                "elapsed_ms",
+            )
+        for record in _records_matching(
+            segment,
+            "box.start_capture_by_awg_trigger.get_current_timecounter",
+            "end",
+        ):
+            add(
+                "box.start_capture get_counter elapsed",
+                action_index,
+                record,
+                "elapsed_ms",
+            )
+        for record in _records_matching(
+            segment,
+            "box.start_capture_by_awg_trigger.start_capunits_by_trigger",
+            "end",
+        ):
+            add(
+                "box.start_capture start_capunits elapsed",
+                action_index,
+                record,
+                "elapsed_ms",
+            )
+        for record in _records_matching(
+            segment,
+            "box.start_capture_by_awg_trigger.start_wavegen",
+            "end",
+        ):
+            add(
+                "box.start_capture start_wavegen elapsed",
+                action_index,
+                record,
+                "elapsed_ms",
+            )
+        for record in _records_matching(
+            segment,
+            "single.start_capture_by_awg_trigger",
+            "end",
+        ):
+            box_key = _record_box_key(record)
+            single_elapsed = _to_float(record.fields.get("elapsed_ms"))
+            box_elapsed = (
+                box_start_elapsed_by_box.get(box_key) if box_key is not None else None
+            )
+            if single_elapsed is None or box_elapsed is None:
+                continue
+            categories["single minus box.start_capture all"].append(
+                WorstRecord(
+                    category="single minus box.start_capture all",
+                    action_index=action_index,
+                    value_ms=single_elapsed - box_elapsed,
+                    path=record.path,
+                    line_number=record.line_number,
+                    event=record.event,
+                    phase=record.phase,
+                    box=box_key,
+                    detail=f"single_elapsed_ms={single_elapsed:.3f} box_elapsed_ms={box_elapsed:.3f}",
+                )
+            )
         for record in _records_matching(segment, "wave.awgunits_task.body", "end"):
             add("wave task body elapsed", action_index, record, "elapsed_ms")
         for record in _records_matching(
@@ -991,6 +1166,13 @@ def render_text_report(report: AnalysisReport, *, top: int = 5) -> Group:
                 "capture_start.box queue_wait",
                 "capture_start.box elapsed",
                 "single.start_capture elapsed",
+                "box.start_capture all elapsed",
+                "box.start_capture map_runits elapsed",
+                "box.start_capture resolve_trigger elapsed",
+                "box.start_capture set_trigger elapsed",
+                "box.start_capture get_counter elapsed",
+                "box.start_capture start_capunits elapsed",
+                "box.start_capture start_wavegen elapsed",
                 "wave.start_awgunits_timed elapsed",
                 "read_counter elapsed",
                 "e7 simple32 elapsed",

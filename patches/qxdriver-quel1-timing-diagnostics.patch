@@ -314,7 +314,7 @@ index 495eeef0..efb5330b 100644
  
  class AwgId(NamedTuple):
      """AWG identifier within a box."""
-@@ -254,17 +258,24 @@ class Action:
+@@ -254,17 +258,25 @@ class Action:
                  for port, runits_ in runits_by_ports.items()
                  for runit in runits_
              }
@@ -342,6 +342,7 @@ index 495eeef0..efb5330b 100644
 -                )
 +                ),
 +                box=self._box,
++                box_name=getattr(self._box, "name", None),
 +                timecounter=timecounter,
 +                awg_count=len(channel_specs),
 +                capture_count=len(runits),
@@ -350,7 +351,7 @@ index 495eeef0..efb5330b 100644
              return {_TRIGGERED_CAPTURE_KEY: (cap_task, gen_task)}
  
          return {
-@@ -304,7 +316,14 @@ class Action:
+@@ -304,7 +317,15 @@ class Action:
          triggered_futures = futures.get(_TRIGGERED_CAPTURE_KEY)
          if triggered_futures is not None:
              cap_task, gen_task = cast(tuple[Any, Any], triggered_futures)
@@ -360,6 +361,7 @@ index 495eeef0..efb5330b 100644
 +                "single.capture_stop.gen_task_result",
 +                gen_task.result,
 +                box=self._box,
++                box_name=getattr(self._box, "name", None),
 +                timecounter=getattr(gen_task, "_timecount", None),
 +                trigger_count=len(self._triggers),
 +            )
