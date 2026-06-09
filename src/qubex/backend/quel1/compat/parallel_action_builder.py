@@ -7,6 +7,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import threading
 import time
 from collections import defaultdict
 from collections.abc import Callable, Mapping, Sequence
@@ -14,6 +15,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from functools import lru_cache
 from importlib.metadata import PackageNotFoundError, version
+from itertools import count
 from logging import Logger
 from types import MappingProxyType
 from typing import Any, Final, Protocol, TypeAlias, TypeGuard, TypeVar, cast
@@ -54,7 +56,11 @@ _TIMING_DIAGNOSTIC_ENV_VARS: Final[tuple[str, ...]] = (
     "QXDRIVER_QUEL1_TIMING_DIAGNOSTICS",
 )
 _TIMING_LOG_MARKER: Final[str] = "qubex_timing"
+_TIMING_LOG_EMIT_SLOW_MS_ENV: Final[str] = "QUBEX_TIMING_LOG_EMIT_SLOW_MS"
+_DEFAULT_TIMING_LOG_EMIT_SLOW_MS: Final[float] = 5.0
 _FALLBACK_TIMECOUNTER_TICK_SECONDS: Final[float] = 8e-9
+_TIMING_SPAN_COUNTER = count(1)
+_TIMING_THREAD_STATE = threading.local()
 T = TypeVar("T")
 
 
@@ -111,6 +117,65 @@ def _format_timing_value(value: Any) -> str:
     return repr(value)
 
 
+def _timing_log_emit_slow_threshold_ms() -> float:
+    """Return the slow logging threshold for timing diagnostics."""
+    value = os.getenv(_TIMING_LOG_EMIT_SLOW_MS_ENV, "")
+    if not value:
+        return _DEFAULT_TIMING_LOG_EMIT_SLOW_MS
+    try:
+        return max(0.0, float(value))
+    except ValueError:
+        return _DEFAULT_TIMING_LOG_EMIT_SLOW_MS
+
+
+def _thread_timing_fields(now_ns: int) -> dict[str, Any]:
+    """Return thread and previous-event gap fields for timing diagnostics."""
+    thread = threading.current_thread()
+    last_ns = getattr(_TIMING_THREAD_STATE, "last_event_ns", None)
+    _TIMING_THREAD_STATE.last_event_ns = now_ns
+    return {
+        "mono_ns": now_ns,
+        "thread_gap_ms": (
+            (now_ns - last_ns) / 1_000_000.0 if last_ns is not None else None
+        ),
+        "thread_id": threading.get_ident(),
+        "thread_name": thread.name,
+        "thread_native_id": threading.get_native_id(),
+    }
+
+
+def _emit_timing_log_line(
+    logger: Logger,
+    parts: list[str],
+    *,
+    source_event: str,
+    source_phase: str,
+) -> None:
+    """Emit one timing line and report slow logging writes."""
+    started = time.perf_counter()
+    logger.info(" ".join(parts))
+    elapsed_ms = (time.perf_counter() - started) * 1000.0
+    threshold_ms = _timing_log_emit_slow_threshold_ms()
+    if elapsed_ms < threshold_ms:
+        return
+
+    now_ns = time.perf_counter_ns()
+    slow_parts = [
+        _TIMING_LOG_MARKER,
+        "event=diagnostic.log_emit",
+        f"elapsed_ms={elapsed_ms:.3f}",
+        f"mono_ns={now_ns}",
+        "phase=slow",
+        f"source_event={source_event}",
+        f"source_phase={source_phase}",
+        f"threshold_ms={threshold_ms:.3f}",
+        f"thread_id={threading.get_ident()}",
+        f"thread_name={threading.current_thread().name}",
+        f"thread_native_id={threading.get_native_id()}",
+    ]
+    logger.info(" ".join(slow_parts))
+
+
 def _entry_count(value: Any) -> int:
     """Return len(value) for diagnostics, falling back to zero."""
     try:
@@ -153,6 +218,7 @@ def _log_timing_event(
     if box is not None and timecounter is not None and current_timecounter is not None:
         remaining_ms = _timecounter_delta_ms(box, timecounter - current_timecounter)
 
+    thread_fields = _thread_timing_fields(time.perf_counter_ns())
     parts = [_TIMING_LOG_MARKER, f"event={event}"]
     if box_name is not None:
         parts.append(f"box={box_name}")
@@ -165,12 +231,44 @@ def _log_timing_event(
     if remaining_ms is not None:
         parts.append(f"remaining_ms={remaining_ms:.3f}")
     parts.append(f"phase={phase}")
-    for key in sorted(fields):
-        value = fields[key]
+    for key in sorted({*thread_fields, *fields}):
+        value = thread_fields.get(key, fields.get(key))
         if value is not None:
             parts.append(f"{key}={_format_timing_value(value)}")
 
-    logger.info(" ".join(parts))
+    _emit_timing_log_line(logger, parts, source_event=event, source_phase=phase)
+
+
+def _with_span_id(fields: dict[str, Any], span_id: int) -> dict[str, Any]:
+    """Return timing fields with a span identifier."""
+    return {**fields, "span_id": span_id}
+
+
+def _log_timing_event_with_span(
+    logger: Logger,
+    event: str,
+    *,
+    phase: str,
+    span_id: int,
+    box: Any | None = None,
+    box_name: str | None = None,
+    timecounter: int | None = None,
+    current_timecounter: int | None = None,
+    elapsed_ms: float | None = None,
+    **fields: Any,
+) -> None:
+    """Log one timing event with a call-span identifier."""
+    _log_timing_event(
+        logger,
+        event,
+        phase=phase,
+        box=box,
+        box_name=box_name,
+        timecounter=timecounter,
+        current_timecounter=current_timecounter,
+        elapsed_ms=elapsed_ms,
+        **_with_span_id(fields, span_id),
+    )
 
 
 def _timed_call(
@@ -187,20 +285,22 @@ def _timed_call(
     if not _timing_diagnostics_enabled(logger):
         return call()
 
-    _log_timing_event(
+    span_id = next(_TIMING_SPAN_COUNTER)
+    _log_timing_event_with_span(
         logger,
         event,
         box=box,
         box_name=box_name,
         timecounter=timecounter,
         phase="start",
+        span_id=span_id,
         **fields,
     )
     started = time.perf_counter()
     try:
         result = call()
     except Exception as exc:
-        _log_timing_event(
+        _log_timing_event_with_span(
             logger,
             event,
             box=box,
@@ -208,11 +308,12 @@ def _timed_call(
             timecounter=timecounter,
             elapsed_ms=(time.perf_counter() - started) * 1000.0,
             phase="error",
+            span_id=span_id,
             error=f"{type(exc).__name__}: {exc}",
             **fields,
         )
         raise
-    _log_timing_event(
+    _log_timing_event_with_span(
         logger,
         event,
         box=box,
@@ -220,6 +321,7 @@ def _timed_call(
         timecounter=timecounter,
         elapsed_ms=(time.perf_counter() - started) * 1000.0,
         phase="end",
+        span_id=span_id,
         **fields,
     )
     return result
@@ -615,18 +717,90 @@ def _estimate_timediff(
 def _run_per_box_parallel(
     items: Sequence[tuple[str, Any]],
     runner: Callable[[str, Any], Any],
+    *,
+    logger: Logger | None = None,
+    event: str | None = None,
 ) -> dict[str, Any]:
     """Run one independent box operation per worker and preserve input order."""
     if not items:
         return {}
 
+    submitted_at = time.perf_counter()
+
     def _invoke(item: tuple[str, Any]) -> tuple[str, Any]:
         name, payload = item
-        return name, runner(name, payload)
+        worker_started = time.perf_counter()
+        queue_wait_ms = (worker_started - submitted_at) * 1000.0
+        if logger is not None and event is not None:
+            _log_timing_event(
+                logger,
+                f"{event}.worker",
+                box_name=name,
+                phase="start",
+                item_count=len(items),
+                queue_wait_ms=queue_wait_ms,
+            )
+        try:
+            result = runner(name, payload)
+        except Exception as exc:
+            if logger is not None and event is not None:
+                _log_timing_event(
+                    logger,
+                    f"{event}.worker",
+                    box_name=name,
+                    elapsed_ms=(time.perf_counter() - worker_started) * 1000.0,
+                    phase="error",
+                    error=f"{type(exc).__name__}: {exc}",
+                    item_count=len(items),
+                    queue_wait_ms=queue_wait_ms,
+                )
+            raise
+        if logger is not None and event is not None:
+            _log_timing_event(
+                logger,
+                f"{event}.worker",
+                box_name=name,
+                elapsed_ms=(time.perf_counter() - worker_started) * 1000.0,
+                phase="end",
+                item_count=len(items),
+                queue_wait_ms=queue_wait_ms,
+            )
+        return name, result
 
     max_workers = max(1, len(items))
+    if logger is not None and event is not None:
+        _log_timing_event(
+            logger,
+            f"{event}.executor",
+            phase="start",
+            item_count=len(items),
+            max_workers=max_workers,
+        )
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        return dict(executor.map(_invoke, items))
+        try:
+            result = dict(executor.map(_invoke, items))
+        except Exception as exc:
+            if logger is not None and event is not None:
+                _log_timing_event(
+                    logger,
+                    f"{event}.executor",
+                    elapsed_ms=(time.perf_counter() - submitted_at) * 1000.0,
+                    phase="error",
+                    error=f"{type(exc).__name__}: {exc}",
+                    item_count=len(items),
+                    max_workers=max_workers,
+                )
+            raise
+    if logger is not None and event is not None:
+        _log_timing_event(
+            logger,
+            f"{event}.executor",
+            elapsed_ms=(time.perf_counter() - submitted_at) * 1000.0,
+            phase="end",
+            item_count=len(items),
+            max_workers=max_workers,
+        )
+    return result
 
 
 @dataclass(frozen=True)
@@ -752,6 +926,8 @@ class QubexMultiAction:
                 lambda: _run_per_box_parallel(
                     capture_actions,
                     _start_capture,
+                    logger=self._logger,
+                    event="qubex.multi.capture_start",
                 ),
                 box=_action_box(reference_action),
                 box_name=self._reference_box_name,
@@ -796,6 +972,8 @@ class QubexMultiAction:
                 lambda: _run_per_box_parallel(
                     list(futures.items()),
                     _stop_capture,
+                    logger=self._logger,
+                    event="qubex.multi.capture_stop",
                 ),
                 box_count=len(futures),
                 total_box_count=len(self._actions),

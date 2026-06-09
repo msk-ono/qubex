@@ -132,6 +132,18 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Enable QuEL-1 timing diagnostic logs when the backend supports them.",
     )
     parser.add_argument(
+        "--e7awghal-timing-slow-ms",
+        type=float,
+        default=None,
+        help="Optional slow threshold for E7AWGHAL_TIMING_SLOW_MS.",
+    )
+    parser.add_argument(
+        "--timing-log-emit-slow-ms",
+        type=float,
+        default=None,
+        help="Optional slow threshold for QUBEX_TIMING_LOG_EMIT_SLOW_MS.",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Build the schedule and print targets without connecting or executing.",
@@ -162,12 +174,22 @@ def _validate_args(args: argparse.Namespace) -> None:
         raise ValueError("--n-repeats must be positive")
     if args.shot_interval_ns is not None and args.shot_interval_ns <= 0.0:
         raise ValueError("--shot-interval-ns must be positive when provided")
+    if args.e7awghal_timing_slow_ms is not None and args.e7awghal_timing_slow_ms < 0.0:
+        raise ValueError("--e7awghal-timing-slow-ms must be non-negative")
+    if args.timing_log_emit_slow_ms is not None and args.timing_log_emit_slow_ms < 0.0:
+        raise ValueError("--timing-log-emit-slow-ms must be non-negative")
 
 
-def _enable_timing_diagnostics() -> None:
+def _enable_timing_diagnostics(args: argparse.Namespace) -> None:
     """Enable supported QuEL-1 timing diagnostic log paths."""
     os.environ["QUBEX_QUEL1_TIMING_DIAGNOSTICS"] = "1"
     os.environ["QXDRIVER_QUEL1_TIMING_DIAGNOSTICS"] = "1"
+    os.environ["QUEL_IC_CONFIG_TIMING_DIAGNOSTICS"] = "1"
+    os.environ["E7AWGHAL_TIMING_DIAGNOSTICS"] = "1"
+    if args.e7awghal_timing_slow_ms is not None:
+        os.environ["E7AWGHAL_TIMING_SLOW_MS"] = str(args.e7awghal_timing_slow_ms)
+    if args.timing_log_emit_slow_ms is not None:
+        os.environ["QUBEX_TIMING_LOG_EMIT_SLOW_MS"] = str(args.timing_log_emit_slow_ms)
 
 
 def _resolve_muxes(args: argparse.Namespace) -> list[str | int]:
@@ -340,7 +362,7 @@ def main() -> int:
     _configure_logging(log_file)
     logger = logging.getLogger("capture_mux_rectangles")
     if args.timing_diagnostics:
-        _enable_timing_diagnostics()
+        _enable_timing_diagnostics(args)
         logger.info("enabled QuEL-1 timing diagnostics")
     return asyncio.run(_run(args, logger))
 

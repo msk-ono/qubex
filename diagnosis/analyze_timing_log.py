@@ -583,6 +583,30 @@ def _metric_stats(records: Sequence[TimingRecord]) -> dict[str, MetricStats]:
             "end",
             "elapsed_ms",
         ),
+        "capture_start.worker queue_wait": _field_values(
+            records,
+            "qubex.multi.capture_start.worker",
+            "start",
+            "queue_wait_ms",
+        ),
+        "capture_start.worker elapsed": _field_values(
+            records,
+            "qubex.multi.capture_start.worker",
+            "end",
+            "elapsed_ms",
+        ),
+        "single.capture_start prepare elapsed": _field_values(
+            records,
+            "single.capture_start.prepare",
+            "end",
+            "elapsed_ms",
+        ),
+        "single.capture_start trigger_sets elapsed": _field_values(
+            records,
+            "single.capture_start.trigger_sets",
+            "end",
+            "elapsed_ms",
+        ),
         "single.start_capture elapsed": _field_values(
             records,
             "single.start_capture_by_awg_trigger",
@@ -686,6 +710,53 @@ def _metric_stats(records: Sequence[TimingRecord]) -> dict[str, MetricStats]:
             "end",
             "elapsed_ms",
         ),
+        "wave task submit elapsed": _field_values(
+            records,
+            "wave.task.submit",
+            "end",
+            "elapsed_ms",
+        ),
+        "wave task result elapsed": _field_values(
+            records,
+            "wave.task.result",
+            "end",
+            "elapsed_ms",
+        ),
+        "wave capunits task body elapsed": _field_values(
+            records,
+            "wave.capunits_task.body",
+            "end",
+            "elapsed_ms",
+        ),
+        "wave awgunits wait_for_start elapsed": _field_values(
+            records,
+            "wave.awgunits_task.wait_for_start",
+            "end",
+            "elapsed_ms",
+        ),
+        "wave capunits wait_for_starting elapsed": _field_values(
+            records,
+            "wave.capunits_by_trigger.wait_for_starting",
+            "end",
+            "elapsed_ms",
+        ),
+        "timing thread_gap": _terminal_field_values(
+            records,
+            "diagnostic.log_emit",
+            "thread_gap_ms",
+        )
+        + [
+            value
+            for record in records
+            if record.event != "diagnostic.log_emit"
+            and (value := _to_float(record.fields.get("thread_gap_ms"))) is not None
+        ],
+        "timing log_emit elapsed": _field_values(
+            records,
+            "diagnostic.log_emit",
+            "slow",
+            "elapsed_ms",
+        ),
         "gen task result elapsed": _field_values(
             records,
             "single.capture_stop.gen_task_result",
@@ -712,6 +783,9 @@ def _record_detail(record: TimingRecord) -> str:
         "remaining_ms_at_check",
         "margin_ms",
         "queue_wait_ms",
+        "thread_gap_ms",
+        "mono_ns",
+        "span_id",
         "box_name",
         "box_repr",
         "awg_count",
@@ -734,6 +808,12 @@ def _record_detail(record: TimingRecord) -> str:
         "sendto_ms",
         "task",
         "thread",
+        "thread_id",
+        "thread_name",
+        "thread_native_id",
+        "source_event",
+        "source_phase",
+        "threshold_ms",
         "error",
     )
     parts = []
@@ -751,7 +831,11 @@ def _worst_records(
     """Return high-cost records grouped by bottleneck class."""
     categories: dict[str, list[WorstRecord]] = {
         "capture_start queue_wait": [],
+        "capture_start worker queue_wait": [],
+        "capture_start worker elapsed": [],
         "capture_start box elapsed": [],
+        "single.capture_start prepare elapsed": [],
+        "single.capture_start trigger_sets elapsed": [],
         "single minus box.start_capture all": [],
         "box.start_capture all elapsed": [],
         "box.start_capture map_runits elapsed": [],
@@ -761,10 +845,17 @@ def _worst_records(
         "box.start_capture start_capunits elapsed": [],
         "box.start_capture start_wavegen elapsed": [],
         "wave task body elapsed": [],
+        "wave capunits task body elapsed": [],
+        "wave task submit elapsed": [],
+        "wave task result elapsed": [],
+        "wave awgunits wait_for_start elapsed": [],
+        "wave capunits wait_for_starting elapsed": [],
         "read_counter elapsed": [],
         "e7 simple32 elapsed": [],
         "e7 simple32 lock_wait": [],
         "e7 simple32 recvfrom": [],
+        "timing thread_gap": [],
+        "timing log_emit elapsed": [],
         "gen task result elapsed": [],
         "low margin_check remaining": [],
     }
@@ -801,10 +892,46 @@ def _worst_records(
             add("capture_start queue_wait", action_index, record, "queue_wait_ms")
         for record in _records_matching(
             segment,
+            "qubex.multi.capture_start.worker",
+            "start",
+        ):
+            add(
+                "capture_start worker queue_wait", action_index, record, "queue_wait_ms"
+            )
+        for record in _records_matching(
+            segment,
+            "qubex.multi.capture_start.worker",
+            "end",
+        ):
+            add("capture_start worker elapsed", action_index, record, "elapsed_ms")
+        for record in _records_matching(
+            segment,
             "qubex.multi.capture_start.box",
             "end",
         ):
             add("capture_start box elapsed", action_index, record, "elapsed_ms")
+        for record in _records_matching(
+            segment,
+            "single.capture_start.prepare",
+            "end",
+        ):
+            add(
+                "single.capture_start prepare elapsed",
+                action_index,
+                record,
+                "elapsed_ms",
+            )
+        for record in _records_matching(
+            segment,
+            "single.capture_start.trigger_sets",
+            "end",
+        ):
+            add(
+                "single.capture_start trigger_sets elapsed",
+                action_index,
+                record,
+                "elapsed_ms",
+            )
         box_start_records = _records_matching(
             segment,
             "box.start_capture_by_awg_trigger.all",
@@ -911,6 +1038,34 @@ def _worst_records(
             )
         for record in _records_matching(segment, "wave.awgunits_task.body", "end"):
             add("wave task body elapsed", action_index, record, "elapsed_ms")
+        for record in _records_matching(segment, "wave.capunits_task.body", "end"):
+            add("wave capunits task body elapsed", action_index, record, "elapsed_ms")
+        for record in _records_matching(segment, "wave.task.submit", "end"):
+            add("wave task submit elapsed", action_index, record, "elapsed_ms")
+        for record in _records_matching(segment, "wave.task.result", "end"):
+            add("wave task result elapsed", action_index, record, "elapsed_ms")
+        for record in _records_matching(
+            segment,
+            "wave.awgunits_task.wait_for_start",
+            "end",
+        ):
+            add(
+                "wave awgunits wait_for_start elapsed",
+                action_index,
+                record,
+                "elapsed_ms",
+            )
+        for record in _records_matching(
+            segment,
+            "wave.capunits_by_trigger.wait_for_starting",
+            "end",
+        ):
+            add(
+                "wave capunits wait_for_starting elapsed",
+                action_index,
+                record,
+                "elapsed_ms",
+            )
         for record in _records_matching(
             segment,
             "wave.awgunits_timed.read_counter",
@@ -924,6 +1079,10 @@ def _worst_records(
             add("e7 simple32 elapsed", action_index, record, "elapsed_ms")
             add("e7 simple32 lock_wait", action_index, record, "lock_wait_ms")
             add("e7 simple32 recvfrom", action_index, record, "recvfrom_ms")
+        for record in _records_matching(segment, "diagnostic.log_emit", "slow"):
+            add("timing log_emit elapsed", action_index, record, "elapsed_ms")
+        for record in segment:
+            add("timing thread_gap", action_index, record, "thread_gap_ms")
         for record in _records_matching(
             segment,
             "single.capture_stop.gen_task_result",
@@ -1164,7 +1323,11 @@ def render_text_report(report: AnalysisReport, *, top: int = 5) -> Group:
                 "capture_start.all elapsed",
                 "capture_start.all remaining",
                 "capture_start.box queue_wait",
+                "capture_start.worker queue_wait",
+                "capture_start.worker elapsed",
                 "capture_start.box elapsed",
+                "single.capture_start prepare elapsed",
+                "single.capture_start trigger_sets elapsed",
                 "single.start_capture elapsed",
                 "box.start_capture all elapsed",
                 "box.start_capture map_runits elapsed",
@@ -1180,6 +1343,8 @@ def render_text_report(report: AnalysisReport, *, top: int = 5) -> Group:
                 "e7 simple32 recvfrom",
                 "margin_check remaining",
                 "add_awg_start elapsed",
+                "timing thread_gap",
+                "timing log_emit elapsed",
             ),
         ),
         _render_metric_table(
@@ -1189,6 +1354,11 @@ def render_text_report(report: AnalysisReport, *, top: int = 5) -> Group:
                 "capture_stop.all elapsed",
                 "capture_stop.box elapsed",
                 "wave task body elapsed",
+                "wave capunits task body elapsed",
+                "wave task submit elapsed",
+                "wave task result elapsed",
+                "wave awgunits wait_for_start elapsed",
+                "wave capunits wait_for_starting elapsed",
                 "gen task result elapsed",
                 "action elapsed",
             ),
