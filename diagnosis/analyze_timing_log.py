@@ -13,6 +13,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from rich import box
+from rich.console import Console, Group
+from rich.panel import Panel
+from rich.table import Table
+
 LOG_LINE_RE = re.compile(
     r"^(?P<timestamp>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3})\s+"
     r"(?P<level>\S+)\s+"
@@ -743,140 +748,207 @@ def _fmt_ms(value: float | None) -> str:
     return "-" if value is None else f"{value:.3f}"
 
 
-def _fmt_stats(stats: MetricStats | None) -> str:
-    """Format one stats line."""
-    if stats is None:
-        return "n=0"
-    return (
-        f"n={stats.count} min={stats.minimum:.3f} "
-        f"med={stats.median:.3f} max={stats.maximum:.3f} "
-        f"mean={stats.mean:.3f}"
-    )
-
-
 def _format_box_map(values: dict[str, float]) -> str:
     """Format one box-keyed metric map."""
     if not values:
         return "-"
-    return ",".join(f"{box}:{value:.3f}" for box, value in sorted(values.items()))
-
-
-def _append_metric_lines(
-    lines: list[str],
-    report: AnalysisReport,
-    names: Sequence[str],
-) -> None:
-    """Append metric stats lines to a text report."""
-    width = max(len(name) for name in names)
-    lines.extend(
-        f"  {name:<{width}}  {_fmt_stats(report.metric_stats.get(name))}"
-        for name in names
+    return ",".join(
+        f"{box_name}:{value:.3f}" for box_name, value in sorted(values.items())
     )
 
 
-def _append_worst_records(
-    lines: list[str],
+def _render_metric_table(
+    report: AnalysisReport,
+    title: str,
+    names: Sequence[str],
+) -> Table:
+    """Render metric statistics as a rich table."""
+    table = Table(
+        title=title,
+        show_header=True,
+        header_style="bold",
+        box=box.HEAVY_HEAD,
+    )
+    table.add_column("Metric")
+    table.add_column("count", justify="right")
+    table.add_column("min[ms]", justify="right")
+    table.add_column("median[ms]", justify="right")
+    table.add_column("max[ms]", justify="right")
+    table.add_column("mean[ms]", justify="right")
+    for name in names:
+        stats = report.metric_stats.get(name)
+        if stats is None:
+            table.add_row(name, "0", "-", "-", "-", "-")
+            continue
+        table.add_row(
+            name,
+            str(stats.count),
+            f"{stats.minimum:.3f}",
+            f"{stats.median:.3f}",
+            f"{stats.maximum:.3f}",
+            f"{stats.mean:.3f}",
+        )
+    return table
+
+
+def _render_action_summary_table(report: AnalysisReport) -> Table:
+    """Render per-action timing summary as a rich table."""
+    table = Table(
+        title="Per-action Summary",
+        show_header=True,
+        header_style="bold",
+        box=box.SIMPLE,
+    )
+    table.add_column("idx", justify="right", no_wrap=True)
+    table.add_column("status", justify="center", no_wrap=True)
+    table.add_column("lines")
+    table.add_column("awg/cap", justify="right", no_wrap=True)
+    table.add_column("action_ms", justify="right")
+    table.add_column("cap_start_ms", justify="right")
+    table.add_column("cap_rem_ms", justify="right")
+    table.add_column("min_margin", justify="right")
+    table.add_column("spare", justify="right")
+    table.add_column("consumed_to_margin", justify="right")
+    table.add_column("cap_stop_ms", justify="right")
+    table.add_column("wave_task_max", justify="right")
+    table.add_column("gen_wait_max", justify="right")
+    table.add_column("qwait_by_box", overflow="fold")
+    table.add_column("cap_elapsed_by_box", overflow="fold")
+    for action in report.actions:
+        table.add_row(
+            str(action.index),
+            action.status,
+            f"{action.path}:{action.line_start}-{action.line_end}",
+            f"{action.awg_count or '-'}/{action.capture_count or '-'}",
+            _fmt_ms(action.action_elapsed_ms),
+            _fmt_ms(action.capture_start_all_elapsed_ms),
+            _fmt_ms(action.capture_start_remaining_ms),
+            _fmt_ms(action.min_margin_ms),
+            _fmt_ms(action.margin_spare_ms),
+            _fmt_ms(action.deadline_consumed_to_margin_ms),
+            _fmt_ms(action.capture_stop_all_elapsed_ms),
+            _fmt_ms(action.max_post_trigger_task_elapsed_ms),
+            _fmt_ms(action.max_gen_task_result_elapsed_ms),
+            _format_box_map(action.queue_wait_by_box),
+            _format_box_map(action.capture_start_elapsed_by_box),
+        )
+    if not report.actions:
+        table.add_row(
+            "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-"
+        )
+    return table
+
+
+def _render_worst_records_table(
     report: AnalysisReport,
     *,
     top: int,
-) -> None:
-    """Append worst-record sections to a text report."""
-    lines.append("")
-    lines.append("Worst Records")
+) -> list[Table]:
+    """Render bottleneck-heavy records as rich tables."""
+    tables: list[Table] = []
     for category, records in report.worst_records.items():
-        lines.append(f"  {category}:")
+        table = Table(
+            title=f"Worst: {category}",
+            show_header=True,
+            header_style="bold",
+            box=box.MINIMAL_HEAVY_HEAD,
+        )
+        table.add_column("action", justify="right", no_wrap=True)
+        table.add_column("file:line", ratio=2, overflow="fold")
+        table.add_column("value[ms]", justify="right")
+        table.add_column("event")
+        table.add_column("phase")
+        table.add_column("box")
+        table.add_column("detail", ratio=3, overflow="fold")
         if not records:
-            lines.append("    -")
+            table.add_row("-", "-", "-", "-", "-", "-", "-")
+            tables.append(table)
             continue
         for record in records[:top]:
-            action = "-" if record.action_index is None else str(record.action_index)
-            lines.append(
-                "    "
-                f"action={action} line={record.path}:{record.line_number} "
-                f"value_ms={record.value_ms:.3f} "
-                f"event={record.event} phase={record.phase} "
-                f"box={record.box or '-'} {record.detail}"
+            table.add_row(
+                "-" if record.action_index is None else str(record.action_index),
+                f"{record.path}:{record.line_number}",
+                f"{record.value_ms:.3f}",
+                record.event,
+                record.phase,
+                record.box or "-",
+                record.detail,
             )
+        tables.append(table)
+    return tables
 
 
-def render_text_report(report: AnalysisReport, *, top: int = 5) -> str:
-    """Render an analysis report as human-readable text."""
-    lines: list[str] = []
-    lines.append("Timing Log Analysis")
-    lines.append(f"  files: {', '.join(report.paths)}")
-    lines.append(
-        f"  records={report.records_count} actions={len(report.actions)} "
-        f"too_late={report.too_late_count} errors={report.error_count}"
+def _render_lines_panel(title: str, lines: Sequence[str]) -> Panel:
+    """Render line-based context messages."""
+    return Panel(
+        "\n".join(lines),
+        title=title,
+        box=box.ROUNDED,
+        expand=False,
     )
+
+
+def _render_overview_panel(report: AnalysisReport) -> Panel:
+    """Render overview fields as a compact panel."""
+    table = Table.grid(padding=(0, 1))
+    table.add_column(style="bold", no_wrap=True)
+    table.add_column(ratio=3)
+    table.add_row("Files", ", ".join(report.paths))
+    table.add_row(
+        "Records",
+        f"{report.records_count} actions={len(report.actions)}",
+    )
+    table.add_row(
+        "Issues",
+        f"too_late={report.too_late_count} errors={report.error_count}",
+    )
+    return Panel(table, title="Timing Log Analysis", box=box.ROUNDED, expand=False)
+
+
+def render_text_report(report: AnalysisReport, *, top: int = 5) -> Group:
+    """Render an analysis report using rich renderables."""
+    sections = [
+        _render_overview_panel(report),
+        _render_metric_table(
+            report,
+            "Deadline-critical path",
+            (
+                "build_scheduled_times elapsed",
+                "capture_start.all elapsed",
+                "capture_start.all remaining",
+                "capture_start.box queue_wait",
+                "capture_start.box elapsed",
+                "single.start_capture elapsed",
+                "wave.start_awgunits_timed elapsed",
+                "margin_check remaining",
+                "add_awg_start elapsed",
+            ),
+        ),
+        _render_metric_table(
+            report,
+            "Post-trigger wait",
+            (
+                "capture_stop.all elapsed",
+                "capture_stop.box elapsed",
+                "wave task body elapsed",
+                "gen task result elapsed",
+                "action elapsed",
+            ),
+        ),
+        _render_action_summary_table(report),
+    ]
     if report.condition_lines:
-        lines.append("")
-        lines.append("Conditions")
-        lines.extend(f"  {line}" for line in report.condition_lines)
+        sections.append(_render_lines_panel("Conditions", report.condition_lines))
     if report.repeat_lines:
-        lines.append("")
-        lines.append("Sweep Lines")
-        lines.extend(f"  {line}" for line in report.repeat_lines)
+        sections.append(_render_lines_panel("Sweep Lines", report.repeat_lines))
+    sections.extend(_render_worst_records_table(report, top=top))
+    return Group(*sections)
 
-    lines.append("")
-    lines.append("Deadline-critical path")
-    _append_metric_lines(
-        lines,
-        report,
-        (
-            "build_scheduled_times elapsed",
-            "capture_start.all elapsed",
-            "capture_start.all remaining",
-            "capture_start.box queue_wait",
-            "capture_start.box elapsed",
-            "single.start_capture elapsed",
-            "wave.start_awgunits_timed elapsed",
-            "margin_check remaining",
-            "add_awg_start elapsed",
-        ),
-    )
 
-    lines.append("")
-    lines.append("Post-trigger wait")
-    _append_metric_lines(
-        lines,
-        report,
-        (
-            "capture_stop.all elapsed",
-            "capture_stop.box elapsed",
-            "wave task body elapsed",
-            "gen task result elapsed",
-            "action elapsed",
-        ),
-    )
-
-    lines.append("")
-    lines.append("Per-action Summary")
-    lines.append(
-        "  idx status lines awg/cap action_ms cap_start_ms cap_rem_ms "
-        "min_margin_ms spare_ms consumed_to_margin_ms cap_stop_ms "
-        "wave_task_max_ms gen_wait_max_ms qwait_by_box cap_elapsed_by_box"
-    )
-    lines.extend(
-        "  "
-        f"{action.index} {action.status} "
-        f"{action.path}:{action.line_start}-{action.line_end} "
-        f"{action.awg_count or '-'}/{action.capture_count or '-'} "
-        f"{_fmt_ms(action.action_elapsed_ms)} "
-        f"{_fmt_ms(action.capture_start_all_elapsed_ms)} "
-        f"{_fmt_ms(action.capture_start_remaining_ms)} "
-        f"{_fmt_ms(action.min_margin_ms)} "
-        f"{_fmt_ms(action.margin_spare_ms)} "
-        f"{_fmt_ms(action.deadline_consumed_to_margin_ms)} "
-        f"{_fmt_ms(action.capture_stop_all_elapsed_ms)} "
-        f"{_fmt_ms(action.max_post_trigger_task_elapsed_ms)} "
-        f"{_fmt_ms(action.max_gen_task_result_elapsed_ms)} "
-        f"{_format_box_map(action.queue_wait_by_box)} "
-        f"{_format_box_map(action.capture_start_elapsed_by_box)}"
-        for action in report.actions
-    )
-
-    _append_worst_records(lines, report, top=top)
-    return "\n".join(lines)
+def print_text_report(report: AnalysisReport, *, top: int = 5) -> None:
+    """Print an analysis report using rich."""
+    console = Console()
+    console.print(render_text_report(report, top=top))
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -890,7 +962,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         sys.stdout.write("\n")
     else:
-        print(render_text_report(report, top=args.top))
+        print_text_report(report, top=args.top)
     return 0
 
 
