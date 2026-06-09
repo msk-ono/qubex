@@ -90,17 +90,6 @@ def _timing_diagnostics_enabled(logger: Logger) -> bool:
     return False
 
 
-def _read_current_timecounter(box: Any) -> tuple[int | None, str | None]:
-    """Read a box timecounter for diagnostics without failing execution."""
-    reader = getattr(box, "get_current_timecounter", None)
-    if reader is None:
-        return None, "box has no get_current_timecounter"
-    try:
-        return int(reader()), None
-    except Exception as exc:  # pragma: no cover - diagnostics only
-        return None, f"{type(exc).__name__}: {exc}"
-
-
 def _timecounter_delta_ms(box: Any, delta: int) -> float:
     """Convert a timecounter delta to milliseconds."""
     wss = getattr(box, "wss", None)
@@ -160,13 +149,9 @@ def _log_timing_event(
     if not _timing_diagnostics_enabled(logger):
         return
 
-    current_error = None
     remaining_ms = None
-    if box is not None and timecounter is not None:
-        if current_timecounter is None:
-            current_timecounter, current_error = _read_current_timecounter(box)
-        if current_timecounter is not None:
-            remaining_ms = _timecounter_delta_ms(box, timecounter - current_timecounter)
+    if box is not None and timecounter is not None and current_timecounter is not None:
+        remaining_ms = _timecounter_delta_ms(box, timecounter - current_timecounter)
 
     parts = [_TIMING_LOG_MARKER, f"event={event}"]
     if box_name is not None:
@@ -179,8 +164,6 @@ def _log_timing_event(
         parts.append(f"current_timecounter={current_timecounter}")
     if remaining_ms is not None:
         parts.append(f"remaining_ms={remaining_ms:.3f}")
-    if current_error is not None:
-        parts.append(f"current_timecounter_error={current_error!r}")
     parts.append(f"phase={phase}")
     for key in sorted(fields):
         value = fields[key]

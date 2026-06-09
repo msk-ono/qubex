@@ -3,7 +3,7 @@ new file mode 100644
 index 0000000..166d7c2
 --- /dev/null
 +++ b/packages/quelware/quel_ic_config/src/quel_ic_config/timing_diagnostics.py
-@@ -0,0 +1,149 @@
+@@ -0,0 +1,129 @@
 +"""Opt-in timing diagnostics for quel_ic_config wave scheduling."""
 +
 +from __future__ import annotations
@@ -11,7 +11,7 @@ index 0000000..166d7c2
 +import os
 +import time
 +from logging import Logger
-+from typing import Any, Callable, Optional, Tuple, TypeVar
++from typing import Any, Callable, Optional, TypeVar
 +
 +_DIAGNOSTICS_ENVS = (
 +    "QUEL_IC_CONFIG_TIMING_DIAGNOSTICS",
@@ -29,20 +29,6 @@ index 0000000..166d7c2
 +        if value.strip().lower() in {"1", "true", "yes", "on"}:
 +            return True
 +    return False
-+
-+
-+def _read_current_timecounter(clkctrl: Any) -> Tuple[Optional[int], Optional[str]]:
-+    reader = getattr(clkctrl, "read_counter", None)
-+    if reader is None:
-+        return None, "clock controller has no read_counter"
-+    try:
-+        value = reader()
-+        if isinstance(value, tuple):
-+            value = value[0]
-+        return int(value), None
-+    except Exception as exc:  # pragma: no cover - diagnostics only
-+        return None, f"{type(exc).__name__}: {exc}"
-+
 +
 +def _timecounter_delta_ms(clkctrl: Any, delta: int) -> float:
 +    frequency = getattr(clkctrl, "CLOCK_FREQUENCY", None)
@@ -73,10 +59,6 @@ index 0000000..166d7c2
 +    if not diagnostics_enabled():
 +        return
 +
-+    current_error = None
-+    if clkctrl is not None and timecounter is not None and current_timecounter is None:
-+        current_timecounter, current_error = _read_current_timecounter(clkctrl)
-+
 +    remaining_ms = None
 +    if timecounter is not None and current_timecounter is not None:
 +        remaining_ms = _timecounter_delta_ms(
@@ -93,8 +75,6 @@ index 0000000..166d7c2
 +        parts.append(f"current_timecounter={current_timecounter}")
 +    if remaining_ms is not None:
 +        parts.append(f"remaining_ms={remaining_ms:.3f}")
-+    if current_error is not None:
-+        parts.append(f"current_timecounter_error={current_error!r}")
 +    for key in sorted(fields):
 +        value = fields[key]
 +        if value is not None:
@@ -253,11 +233,14 @@ index ca23b14..f2ec599 100644
  
  class StartAwgunitsNowTask(AbstractStartAwgunitsTask):
      _PRELOAD_TIMEOUT: Final[float] = 0.25
-@@ -402,13 +454,50 @@ class StartAwgunitsTimedTask(AbstractStartAwgunitsTask):
+@@ -402,13 +454,62 @@ class StartAwgunitsTimedTask(AbstractStartAwgunitsTask):
  
      def _activate_awgunits(self) -> None:
-         cur, _ = self._clkctrl.read_counter()
+-        cur, _ = self._clkctrl.read_counter()
 -        if self._timecount < cur + self._TRIGGER_SETTABLE_MARGIN * self._clkctrl.CLOCK_FREQUENCY:
++        read_counter_started = time.perf_counter()
++        cur, _ = self._clkctrl.read_counter()
++        read_counter_elapsed_ms = (time.perf_counter() - read_counter_started) * 1000.0
 +        margin_count = round(self._TRIGGER_SETTABLE_MARGIN * self._clkctrl.CLOCK_FREQUENCY)
 +        remaining_count = self._timecount - cur
 +        remaining_ms = remaining_count / self._clkctrl.CLOCK_FREQUENCY * 1000.0
@@ -268,6 +251,16 @@ index ca23b14..f2ec599 100644
 +            "margin_ms": margin_ms,
 +            "remaining_ms_at_check": remaining_ms,
 +        }
++        log_timing_event(
++            logger,
++            "wave.awgunits_timed.read_counter",
++            clkctrl=self._clkctrl,
++            timecounter=self._timecount,
++            current_timecounter=cur,
++            elapsed_ms=read_counter_elapsed_ms,
++            phase="end",
++            **common_fields,
++        )
 +        log_timing_event(
 +            logger,
 +            "wave.awgunits_timed.activate",

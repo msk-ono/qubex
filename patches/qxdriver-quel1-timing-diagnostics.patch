@@ -3,7 +3,7 @@ new file mode 100644
 index 00000000..4b02df74
 --- /dev/null
 +++ b/packages/qxdriver-quel1/src/qxdriver_quel1/driver/timing_diagnostics.py
-@@ -0,0 +1,139 @@
+@@ -0,0 +1,135 @@
 +"""Opt-in timing diagnostics for QuEL-1 direct-driver actions."""
 +
 +from __future__ import annotations
@@ -24,17 +24,6 @@ index 00000000..4b02df74
 +    """Return True when QuEL-1 timing diagnostics are enabled."""
 +    value = os.getenv(_DIAGNOSTICS_ENV, "")
 +    return value.strip().lower() in {"1", "true", "yes", "on"}
-+
-+
-+def _read_current_timecounter(box: Any) -> tuple[int | None, str | None]:
-+    reader = getattr(box, "get_current_timecounter", None)
-+    if reader is None:
-+        return None, "box has no get_current_timecounter"
-+    try:
-+        return int(reader()), None
-+    except Exception as exc:  # pragma: no cover - diagnostics only
-+        return None, f"{type(exc).__name__}: {exc}"
-+
 +
 +def _timecounter_delta_ms(box: Any, delta: int) -> float:
 +    wss = getattr(box, "wss", None)
@@ -62,6 +51,7 @@ index 00000000..4b02df74
 +    box: Any | None = None,
 +    box_name: str | None = None,
 +    timecounter: int | None = None,
++    current_timecounter: int | None = None,
 +    elapsed_ms: float | None = None,
 +    **fields: Any,
 +) -> None:
@@ -69,16 +59,12 @@ index 00000000..4b02df74
 +    if not diagnostics_enabled():
 +        return
 +
-+    current_timecounter = None
-+    current_error = None
 +    remaining_ms = None
-+    if box is not None and timecounter is not None:
-+        current_timecounter, current_error = _read_current_timecounter(box)
-+        if current_timecounter is not None:
-+            remaining_ms = _timecounter_delta_ms(
-+                box,
-+                timecounter - current_timecounter,
-+            )
++    if box is not None and timecounter is not None and current_timecounter is not None:
++        remaining_ms = _timecounter_delta_ms(
++            box,
++            timecounter - current_timecounter,
++        )
 +
 +    parts = ["qxdriver_quel1_timing", f"event={event}"]
 +    if box_name is not None:
@@ -91,8 +77,6 @@ index 00000000..4b02df74
 +        parts.append(f"current_timecounter={current_timecounter}")
 +    if remaining_ms is not None:
 +        parts.append(f"remaining_ms={remaining_ms:.3f}")
-+    if current_error is not None:
-+        parts.append(f"current_timecounter_error={current_error!r}")
 +    for key in sorted(fields):
 +        value = fields[key]
 +        if value is not None:
@@ -109,13 +93,23 @@ index 00000000..4b02df74
 +    box: Any | None = None,
 +    box_name: str | None = None,
 +    timecounter: int | None = None,
++    current_timecounter: int | None = None,
 +    **fields: Any,
 +) -> T:
 +    """Run a call and log elapsed wall-clock time when diagnostics are enabled."""
 +    if not diagnostics_enabled():
 +        return call()
 +
-+    log_timing_event(logger, event, box=box, box_name=box_name, timecounter=timecounter, phase="start", **fields)
++    log_timing_event(
++        logger,
++        event,
++        box=box,
++        box_name=box_name,
++        timecounter=timecounter,
++        current_timecounter=current_timecounter,
++        phase="start",
++        **fields,
++    )
 +    started = time.perf_counter()
 +    try:
 +        result = call()
@@ -126,6 +120,7 @@ index 00000000..4b02df74
 +            box=box,
 +            box_name=box_name,
 +            timecounter=timecounter,
++            current_timecounter=current_timecounter,
 +            elapsed_ms=(time.perf_counter() - started) * 1000.0,
 +            phase="error",
 +            error=f"{type(exc).__name__}: {exc}",
@@ -138,6 +133,7 @@ index 00000000..4b02df74
 +        box=box,
 +        box_name=box_name,
 +        timecounter=timecounter,
++        current_timecounter=current_timecounter,
 +        elapsed_ms=(time.perf_counter() - started) * 1000.0,
 +        phase="end",
 +        **fields,
