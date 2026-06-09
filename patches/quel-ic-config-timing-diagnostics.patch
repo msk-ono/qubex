@@ -1,0 +1,375 @@
+diff --git a/packages/quelware/quel_ic_config/src/quel_ic_config/timing_diagnostics.py b/packages/quelware/quel_ic_config/src/quel_ic_config/timing_diagnostics.py
+new file mode 100644
+index 0000000..166d7c2
+--- /dev/null
++++ b/packages/quelware/quel_ic_config/src/quel_ic_config/timing_diagnostics.py
+@@ -0,0 +1,149 @@
++"""Opt-in timing diagnostics for quel_ic_config wave scheduling."""
++
++from __future__ import annotations
++
++import os
++import time
++from logging import Logger
++from typing import Any, Callable, Optional, Tuple, TypeVar
++
++_DIAGNOSTICS_ENVS = (
++    "QUEL_IC_CONFIG_TIMING_DIAGNOSTICS",
++    "QXDRIVER_QUEL1_TIMING_DIAGNOSTICS",
++)
++_FALLBACK_TICK_SECONDS = 8e-9
++
++T = TypeVar("T")
++
++
++def diagnostics_enabled() -> bool:
++    """Return True when quel_ic_config timing diagnostics are enabled."""
++    for env_name in _DIAGNOSTICS_ENVS:
++        value = os.getenv(env_name, "")
++        if value.strip().lower() in {"1", "true", "yes", "on"}:
++            return True
++    return False
++
++
++def _read_current_timecounter(clkctrl: Any) -> Tuple[Optional[int], Optional[str]]:
++    reader = getattr(clkctrl, "read_counter", None)
++    if reader is None:
++        return None, "clock controller has no read_counter"
++    try:
++        value = reader()
++        if isinstance(value, tuple):
++            value = value[0]
++        return int(value), None
++    except Exception as exc:  # pragma: no cover - diagnostics only
++        return None, f"{type(exc).__name__}: {exc}"
++
++
++def _timecounter_delta_ms(clkctrl: Any, delta: int) -> float:
++    frequency = getattr(clkctrl, "CLOCK_FREQUENCY", None)
++    if frequency:
++        return delta / float(frequency) * 1000.0
++    return delta * _FALLBACK_TICK_SECONDS * 1000.0
++
++
++def _format_value(value: Any) -> str:
++    if isinstance(value, float):
++        return f"{value:.3f}"
++    if isinstance(value, (bool, int, str)):
++        return str(value)
++    return repr(value)
++
++
++def log_timing_event(
++    logger: Logger,
++    event: str,
++    *,
++    clkctrl: Any = None,
++    timecounter: Optional[int] = None,
++    current_timecounter: Optional[int] = None,
++    elapsed_ms: Optional[float] = None,
++    **fields: Any,
++) -> None:
++    """Log one timing diagnostic event when diagnostics are enabled."""
++    if not diagnostics_enabled():
++        return
++
++    current_error = None
++    if clkctrl is not None and timecounter is not None and current_timecounter is None:
++        current_timecounter, current_error = _read_current_timecounter(clkctrl)
++
++    remaining_ms = None
++    if timecounter is not None and current_timecounter is not None:
++        remaining_ms = _timecounter_delta_ms(
++            clkctrl,
++            timecounter - current_timecounter,
++        )
++
++    parts = ["quel_ic_config_timing", f"event={event}"]
++    if elapsed_ms is not None:
++        parts.append(f"elapsed_ms={elapsed_ms:.3f}")
++    if timecounter is not None:
++        parts.append(f"timecounter={timecounter}")
++    if current_timecounter is not None:
++        parts.append(f"current_timecounter={current_timecounter}")
++    if remaining_ms is not None:
++        parts.append(f"remaining_ms={remaining_ms:.3f}")
++    if current_error is not None:
++        parts.append(f"current_timecounter_error={current_error!r}")
++    for key in sorted(fields):
++        value = fields[key]
++        if value is not None:
++            parts.append(f"{key}={_format_value(value)}")
++
++    logger.info(" ".join(parts))
++
++
++def timed_call(
++    logger: Logger,
++    event: str,
++    call: Callable[[], T],
++    *,
++    clkctrl: Any = None,
++    timecounter: Optional[int] = None,
++    current_timecounter: Optional[int] = None,
++    **fields: Any,
++) -> T:
++    """Run a call and log elapsed wall-clock time when diagnostics are enabled."""
++    if not diagnostics_enabled():
++        return call()
++
++    log_timing_event(
++        logger,
++        event,
++        clkctrl=clkctrl,
++        timecounter=timecounter,
++        current_timecounter=current_timecounter,
++        phase="start",
++        **fields,
++    )
++    started = time.perf_counter()
++    try:
++        result = call()
++    except Exception as exc:
++        log_timing_event(
++            logger,
++            event,
++            clkctrl=clkctrl,
++            timecounter=timecounter,
++            current_timecounter=current_timecounter,
++            elapsed_ms=(time.perf_counter() - started) * 1000.0,
++            phase="error",
++            error=f"{type(exc).__name__}: {exc}",
++            **fields,
++        )
++        raise
++    log_timing_event(
++        logger,
++        event,
++        clkctrl=clkctrl,
++        timecounter=timecounter,
++        current_timecounter=current_timecounter,
++        elapsed_ms=(time.perf_counter() - started) * 1000.0,
++        phase="end",
++        **fields,
++    )
++    return result
+diff --git a/packages/quelware/quel_ic_config/src/quel_ic_config/quel1_wave_subsystem.py b/packages/quelware/quel_ic_config/src/quel_ic_config/quel1_wave_subsystem.py
+index ca23b14..f2ec599 100644
+--- a/packages/quelware/quel_ic_config/src/quel_ic_config/quel1_wave_subsystem.py
++++ b/packages/quelware/quel_ic_config/src/quel_ic_config/quel1_wave_subsystem.py
+@@ -29,6 +29,7 @@ from e7awghal import (
+     create_quel1au50hal,
+ )
+ from e7awghal.common_defs import _DEFAULT_POLLING_PERIOD
++from quel_ic_config.timing_diagnostics import diagnostics_enabled, log_timing_event, timed_call
+ 
+ logger = logging.getLogger(__name__)
+ 
+@@ -57,6 +58,7 @@ class AbstractCancellableTask(
+         "_cancelled",
+         "_future",
+         "_lock",
++        "_diagnostics_submitted_at",
+     }
+ 
+     def __init__(self, pool: ThreadPoolExecutor, *args):
+@@ -66,6 +68,7 @@ class AbstractCancellableTask(
+         self._cancel_failed: bool = False
+         self._cancelled: bool = False
+         self._future: Union[Future[RT], None] = None
++        self._diagnostics_submitted_at: float = 0.0
+         self._lock = RLock()
+ 
+     @abstractmethod
+@@ -95,6 +98,7 @@ class AbstractCancellableTask(
+     def start(self) -> None:
+         with self._lock:
+             if self._future is None:
++                self._diagnostics_submitted_at = time.perf_counter()
+                 self._future = self._pool.submit(self._body, *self._args)
+             else:
+                 raise RuntimeError("already started")
+@@ -306,7 +310,7 @@ class AbstractStartAwgunitsTask(AbstractCancellableTask[None]):
+         self._awgctrl.check_error(self._hwidxs)
+         raise CancelledError(cancel_msg)
+ 
+-    def _body(self) -> None:
++    def _body_without_diagnostics(self) -> None:
+         with self._awgctrl.lock:
+             if self._awgctrl.are_busy_any(self._hwidxs):
+                 raise RuntimeError(f"stop preloading because some of {self._idxs_string} are still busy")
+@@ -326,6 +330,54 @@ class AbstractStartAwgunitsTask(AbstractCancellableTask[None]):
+         )
+         return None
+ 
++    def _body(self) -> None:
++        if not diagnostics_enabled():
++            return self._body_without_diagnostics()
++
++        started = time.perf_counter()
++        submitted_at = self._diagnostics_submitted_at
++        queue_wait_ms = (started - submitted_at) * 1000.0 if submitted_at else None
++        clkctrl = getattr(self, "_clkctrl", None)
++        timecount = getattr(self, "_timecount", None)
++        fields = {
++            "task": self.__class__.__name__,
++            "awgunit_count": len(self._hwidxs),
++            "awgunits": sorted(self._hwidxs),
++            "queue_wait_ms": queue_wait_ms,
++        }
++        log_timing_event(
++            logger,
++            "wave.awgunits_task.body",
++            clkctrl=clkctrl,
++            timecounter=timecount,
++            phase="start",
++            **fields,
++        )
++        try:
++            self._body_without_diagnostics()
++        except Exception as exc:
++            log_timing_event(
++                logger,
++                "wave.awgunits_task.body",
++                clkctrl=clkctrl,
++                timecounter=timecount,
++                elapsed_ms=(time.perf_counter() - started) * 1000.0,
++                phase="error",
++                error=f"{type(exc).__name__}: {exc}",
++                **fields,
++            )
++            raise
++        log_timing_event(
++            logger,
++            "wave.awgunits_task.body",
++            clkctrl=clkctrl,
++            timecounter=timecount,
++            elapsed_ms=(time.perf_counter() - started) * 1000.0,
++            phase="end",
++            **fields,
++        )
++        return None
++
+ 
+ class StartAwgunitsNowTask(AbstractStartAwgunitsTask):
+     _PRELOAD_TIMEOUT: Final[float] = 0.25
+@@ -402,13 +454,50 @@ class StartAwgunitsTimedTask(AbstractStartAwgunitsTask):
+ 
+     def _activate_awgunits(self) -> None:
+         cur, _ = self._clkctrl.read_counter()
+-        if self._timecount < cur + self._TRIGGER_SETTABLE_MARGIN * self._clkctrl.CLOCK_FREQUENCY:
++        margin_count = round(self._TRIGGER_SETTABLE_MARGIN * self._clkctrl.CLOCK_FREQUENCY)
++        remaining_count = self._timecount - cur
++        remaining_ms = remaining_count / self._clkctrl.CLOCK_FREQUENCY * 1000.0
++        margin_ms = margin_count / self._clkctrl.CLOCK_FREQUENCY * 1000.0
++        common_fields = {
++            "awgunit_count": len(self._hwidxs),
++            "awgunits": sorted(self._hwidxs),
++            "margin_ms": margin_ms,
++            "remaining_ms_at_check": remaining_ms,
++        }
++        log_timing_event(
++            logger,
++            "wave.awgunits_timed.activate",
++            clkctrl=self._clkctrl,
++            timecounter=self._timecount,
++            current_timecounter=cur,
++            phase="margin_check",
++            **common_fields,
++        )
++        if self._timecount < cur + margin_count:
++            log_timing_event(
++                logger,
++                "wave.awgunits_timed.activate",
++                clkctrl=self._clkctrl,
++                timecounter=self._timecount,
++                current_timecounter=cur,
++                phase="too_late",
++                **common_fields,
++            )
+             raise RuntimeError(f"specified timecount (= {self._timecount}) is too late to schedule")
+         self._delta = (self._timecount - cur) / self._clkctrl.CLOCK_FREQUENCY
+ 
+         trig = SimplemultiAwgTriggers()
+         trig.append(self._timecount, self._hwidxs)
+-        self._sqrctrl.add_awg_start(trig)
++        timed_call(
++            logger,
++            "wave.awgunits_timed.add_awg_start",
++            lambda: self._sqrctrl.add_awg_start(trig),
++            clkctrl=self._clkctrl,
++            timecounter=self._timecount,
++            current_timecounter=cur,
++            delta_ms=self._delta * 1000.0,
++            **common_fields,
++        )
+ 
+     def _wait_for_preparation(self) -> None:
+         # do nothing
+@@ -556,14 +645,12 @@ class AbstractStartCapunitsTask(Generic[CCT], AbstractCancellableTask[dict[tuple
+             elif n < m:
+                 broken_data = True
+                 logger.error(
+-                    f"size of the data captured by capunit-#{idx} is shorter than expected "
+-                    f"({n} samples < {m} samples)"
++                    f"size of the data captured by capunit-#{idx} is shorter than expected ({n} samples < {m} samples)"
+                 )
+             else:
+                 broken_data = True
+                 logger.error(
+-                    f"size of the data captured by capunit-#{idx} is longer than expected "
+-                    f"({n} samples > {m} samples)"
++                    f"size of the data captured by capunit-#{idx} is longer than expected ({n} samples > {m} samples)"
+                 )
+ 
+         if broken_data:
+@@ -842,22 +929,34 @@ class Quel1WaveSubsystem:
+         disable_timeout: bool = False,
+         return_after_start_emission: bool = False,
+     ) -> StartAwgunitsTimedTask:
+-        awgunits = {idx: self.hal.awgunit(idx) for idx in awgunit_idxs}
+-        task = StartAwgunitsTimedTask(
+-            self.hal.awgctrl._pool,
+-            self.hal.awgctrl,
+-            awgunits,
+-            self.hal.sqrctrl,
+-            self.hal.clkcntr,
+-            timecount=timecount,
+-            timeout=timeout,
+-            polling_period=polling_period,
+-            disable_timeout=disable_timeout,
++        def _start_task() -> StartAwgunitsTimedTask:
++            awgunits = {idx: self.hal.awgunit(idx) for idx in awgunit_idxs}
++            task = StartAwgunitsTimedTask(
++                self.hal.awgctrl._pool,
++                self.hal.awgctrl,
++                awgunits,
++                self.hal.sqrctrl,
++                self.hal.clkcntr,
++                timecount=timecount,
++                timeout=timeout,
++                polling_period=polling_period,
++                disable_timeout=disable_timeout,
++            )
++            task.start()
++            if return_after_start_emission:
++                task.wait_for_starting_emission()
++            return task
++
++        return timed_call(
++            logger,
++            "wave.start_awgunits_timed",
++            _start_task,
++            clkctrl=self.hal.clkcntr,
++            timecounter=timecount,
++            awgunit_count=len(awgunit_idxs),
++            awgunits=sorted(awgunit_idxs),
++            return_after_start_emission=return_after_start_emission,
+         )
+-        task.start()
+-        if return_after_start_emission:
+-            task.wait_for_starting_emission()
+-        return task
+ 
+     def initialize_capunits(self, capunit_idxs: Collection[tuple[int, int]]):
+         for i in capunit_idxs:
