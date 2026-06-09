@@ -1,0 +1,163 @@
+diff --git a/packages/quelware/e7awghal/src/e7awghal/e7awg_packet.py b/packages/quelware/e7awghal/src/e7awghal/e7awg_packet.py
+--- a/packages/quelware/e7awghal/src/e7awghal/e7awg_packet.py
++++ b/packages/quelware/e7awghal/src/e7awghal/e7awg_packet.py
+@@ -1,9 +1,11 @@
+ import logging
++import os
+ import socket
+ import struct
++import time
+ from abc import ABCMeta
+ from enum import Enum
+-from threading import Lock
++from threading import Lock, current_thread
+ from typing import Callable, Final, Union
+ 
+ import numpy as np
+@@ -11,6 +13,75 @@ import numpy as np
+ logger = logging.getLogger(__name__)
+ 
+ 
++_TIMING_DIAGNOSTIC_ENVS: Final[tuple[str, ...]] = (
++    "E7AWGHAL_TIMING_DIAGNOSTICS",
++    "QXDRIVER_QUEL1_TIMING_DIAGNOSTICS",
++    "QUEL_IC_CONFIG_TIMING_DIAGNOSTICS",
++)
++_TIMING_SLOW_THRESHOLD_ENV: Final[str] = "E7AWGHAL_TIMING_SLOW_MS"
++_DEFAULT_TIMING_SLOW_THRESHOLD_MS: Final[float] = 5.0
++
++
++def _timing_diagnostics_enabled() -> bool:
++    for env_name in _TIMING_DIAGNOSTIC_ENVS:
++        value = os.getenv(env_name, "")
++        if value.strip().lower() in {"1", "true", "yes", "on"}:
++            return True
++    return False
++
++
++def _timing_slow_threshold_ms() -> float:
++    value = os.getenv(_TIMING_SLOW_THRESHOLD_ENV, "")
++    if not value:
++        return _DEFAULT_TIMING_SLOW_THRESHOLD_MS
++    try:
++        threshold_ms = float(value)
++    except ValueError:
++        return _DEFAULT_TIMING_SLOW_THRESHOLD_MS
++    return max(0.0, threshold_ms)
++
++
++def _format_timing_value(value: object) -> str:
++    if isinstance(value, float):
++        return f"{value:.3f}"
++    if isinstance(value, (bool, int, str)):
++        return str(value)
++    return repr(value)
++
++
++def _log_e7awghal_timing_event(
++    event: str,
++    *,
++    phase: str,
++    threshold_ms: float,
++    elapsed_ms: float,
++    **fields: object,
++) -> None:
++    if not _timing_diagnostics_enabled():
++        return
++    lock_wait_ms = fields.get("lock_wait_ms")
++    recvfrom_ms = fields.get("recvfrom_ms")
++    if (
++        phase == "end"
++        and elapsed_ms < threshold_ms
++        and not (isinstance(lock_wait_ms, float) and lock_wait_ms >= threshold_ms)
++        and not (isinstance(recvfrom_ms, float) and recvfrom_ms >= threshold_ms)
++    ):
++        return
++
++    parts = [
++        "e7awghal_timing",
++        f"event={event}",
++        f"phase={phase}",
++        f"elapsed_ms={elapsed_ms:.3f}",
++    ]
++    for key in sorted(fields):
++        value = fields[key]
++        if value is not None:
++            parts.append(f"{key}={_format_timing_value(value)}")
++    logger.info(" ".join(parts))
++
++
+ class BoxLockDelegationError(Exception):
+     pass
+ 
+@@ -394,28 +465,70 @@ class E7awgSimple32PacketAccess(BasePacketAccess):
+         super().__init__(ip_addr, port, timeout=timeout)
+ 
+     def send_command(self, pkt: E7awgSimple32OutgoingPacket, is_network_endian: bool) -> E7awgSimple32IncomingPacket:
++        diagnostics = _timing_diagnostics_enabled()
++        threshold_ms = _timing_slow_threshold_ms() if diagnostics else _DEFAULT_TIMING_SLOW_THRESHOLD_MS
++        started = time.perf_counter()
++        lock_requested = started
++        lock_acquired = None
++        sendto_ms = None
++        recv_started = None
++        recv_done = None
++        recv_attempts = 0
++        phase = "end"
++        error = None
+         try:
+             with self._lock:
++                lock_acquired = time.perf_counter()
+                 # Notes: all types of the packets are subject to access controls. (not only packet with side effect due
+                 #        to wrong design of e7awghw)
+                 if not self._auth_callback():
+                     raise BoxLockDelegationError(f"device lock of {self._dest_addrport[0]} is not available now")
++                send_started = time.perf_counter()
+                 self._sock.sendto(pkt._buffer, self._dest_addrport)
++                sendto_ms = (time.perf_counter() - send_started) * 1000.0
+                 # TODO: implement timeout (!)
++                recv_started = time.perf_counter()
+                 while True:
++                    recv_attempts += 1
+                     recv_data, recv_addr = self._sock.recvfrom(self._DEFAULT_MAX_PACKET_SIZE)
+                     if self._validate_sender(recv_addr):
+                         break
++                recv_done = time.perf_counter()
+             rpl = E7awgSimple32IncomingPacket(recv_data, is_network_endian)
+             if not rpl.is_valid_for(pkt.mode):
+                 raise ValueError(f"unexpected reply: mode = {pkt.mode} -> {rpl.mode} from {recv_addr}")
+         except BoxLockDelegationError:
+             # Notes: no log message
++            phase = "error"
++            error = "BoxLockDelegationError"
+             raise
+         except Exception as e:
+             # Notes: sock.timeout is typical.
++            phase = "error"
++            error = type(e).__name__
+             logger.error(e)
+             raise
++        finally:
++            if diagnostics:
++                finished = time.perf_counter()
++                if recv_started is not None and recv_done is None:
++                    recv_done = finished
++                _log_e7awghal_timing_event(
++                    "e7awg.simple32.send_command",
++                    phase=phase,
++                    threshold_ms=threshold_ms,
++                    elapsed_ms=(finished - started) * 1000.0,
++                    dest=f"{self._dest_addrport[0]}:{self._dest_addrport[1]}",
++                    error=error,
++                    lock_wait_ms=(
++                        (lock_acquired - lock_requested) * 1000.0 if lock_acquired is not None else None
++                    ),
++                    mode=pkt.mode.name,
++                    recv_attempts=recv_attempts,
++                    recvfrom_ms=(recv_done - recv_started) * 1000.0 if recv_started is not None else None,
++                    sendto_ms=sendto_ms,
++                    thread=current_thread().name,
++                )
+ 
+         return rpl
+ 

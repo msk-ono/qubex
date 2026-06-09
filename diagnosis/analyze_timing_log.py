@@ -32,6 +32,7 @@ TIMING_MARKERS = {
     "qxdriver_quel1_timing": "qxdriver",
     "quel_ic_config_timing": "quel_ic_config",
     "qubex_timing": "qubex",
+    "e7awghal_timing": "e7awghal",
 }
 DEFAULT_SCHEDULED_OFFSET_MS = 150.0
 
@@ -98,6 +99,7 @@ class ActionSummary:
     deadline_consumed_to_capture_start_end_ms: float | None
     deadline_consumed_to_margin_ms: float | None
     max_add_awg_start_elapsed_ms: float | None
+    max_read_counter_elapsed_ms: float | None
     capture_stop_all_elapsed_ms: float | None
     max_post_trigger_task_elapsed_ms: float | None
     max_gen_task_result_elapsed_ms: float | None
@@ -484,6 +486,14 @@ def _summarize_action(index: int, records: Sequence[TimingRecord]) -> ActionSumm
                 "elapsed_ms",
             )
         ),
+        max_read_counter_elapsed_ms=_max_or_none(
+            _field_values(
+                records,
+                "wave.awgunits_timed.read_counter",
+                "end",
+                "elapsed_ms",
+            )
+        ),
         capture_stop_all_elapsed_ms=_float_field(
             capture_stop_terminal,
             "elapsed_ms",
@@ -586,6 +596,27 @@ def _metric_stats(records: Sequence[TimingRecord]) -> dict[str, MetricStats]:
             "end",
             "elapsed_ms",
         ),
+        "e7 simple32 elapsed": _terminal_field_values(
+            records,
+            "e7awg.simple32.send_command",
+            "elapsed_ms",
+        ),
+        "e7 simple32 lock_wait": _terminal_field_values(
+            records,
+            "e7awg.simple32.send_command",
+            "lock_wait_ms",
+        ),
+        "e7 simple32 recvfrom": _terminal_field_values(
+            records,
+            "e7awg.simple32.send_command",
+            "recvfrom_ms",
+        ),
+        "read_counter elapsed": _field_values(
+            records,
+            "wave.awgunits_timed.read_counter",
+            "end",
+            "elapsed_ms",
+        ),
         "capture_stop.all elapsed": _terminal_field_values(
             records,
             "qubex.multi.capture_stop.all",
@@ -632,7 +663,14 @@ def _record_detail(record: TimingRecord) -> str:
         "capture_count",
         "awgunit_count",
         "awgunits",
+        "dest",
+        "lock_wait_ms",
+        "mode",
+        "recv_attempts",
+        "recvfrom_ms",
+        "sendto_ms",
         "task",
+        "thread",
         "error",
     )
     parts = []
@@ -652,6 +690,10 @@ def _worst_records(
         "capture_start queue_wait": [],
         "capture_start box elapsed": [],
         "wave task body elapsed": [],
+        "read_counter elapsed": [],
+        "e7 simple32 elapsed": [],
+        "e7 simple32 lock_wait": [],
+        "e7 simple32 recvfrom": [],
         "gen task result elapsed": [],
         "low margin_check remaining": [],
     }
@@ -694,6 +736,19 @@ def _worst_records(
             add("capture_start box elapsed", action_index, record, "elapsed_ms")
         for record in _records_matching(segment, "wave.awgunits_task.body", "end"):
             add("wave task body elapsed", action_index, record, "elapsed_ms")
+        for record in _records_matching(
+            segment,
+            "wave.awgunits_timed.read_counter",
+            "end",
+        ):
+            add("read_counter elapsed", action_index, record, "elapsed_ms")
+        for record in _records_matching(
+            segment,
+            "e7awg.simple32.send_command",
+        ):
+            add("e7 simple32 elapsed", action_index, record, "elapsed_ms")
+            add("e7 simple32 lock_wait", action_index, record, "lock_wait_ms")
+            add("e7 simple32 recvfrom", action_index, record, "recvfrom_ms")
         for record in _records_matching(
             segment,
             "single.capture_stop.gen_task_result",
@@ -809,6 +864,7 @@ def _render_action_summary_table(report: AnalysisReport) -> Table:
     table.add_column("min_margin", justify="right")
     table.add_column("spare", justify="right")
     table.add_column("consumed_to_margin", justify="right")
+    table.add_column("read_counter_max", justify="right")
     table.add_column("cap_stop_ms", justify="right")
     table.add_column("wave_task_max", justify="right")
     table.add_column("gen_wait_max", justify="right")
@@ -826,6 +882,7 @@ def _render_action_summary_table(report: AnalysisReport) -> Table:
             _fmt_ms(action.min_margin_ms),
             _fmt_ms(action.margin_spare_ms),
             _fmt_ms(action.deadline_consumed_to_margin_ms),
+            _fmt_ms(action.max_read_counter_elapsed_ms),
             _fmt_ms(action.capture_stop_all_elapsed_ms),
             _fmt_ms(action.max_post_trigger_task_elapsed_ms),
             _fmt_ms(action.max_gen_task_result_elapsed_ms),
@@ -834,7 +891,22 @@ def _render_action_summary_table(report: AnalysisReport) -> Table:
         )
     if not report.actions:
         table.add_row(
-            "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-"
+            "-",
+            "-",
+            "-",
+            "-",
+            "-",
+            "-",
+            "-",
+            "-",
+            "-",
+            "-",
+            "-",
+            "-",
+            "-",
+            "-",
+            "-",
+            "-",
         )
     return table
 
@@ -920,6 +992,10 @@ def render_text_report(report: AnalysisReport, *, top: int = 5) -> Group:
                 "capture_start.box elapsed",
                 "single.start_capture elapsed",
                 "wave.start_awgunits_timed elapsed",
+                "read_counter elapsed",
+                "e7 simple32 elapsed",
+                "e7 simple32 lock_wait",
+                "e7 simple32 recvfrom",
                 "margin_check remaining",
                 "add_awg_start elapsed",
             ),
