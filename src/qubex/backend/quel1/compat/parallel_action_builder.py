@@ -4,7 +4,10 @@
 
 from __future__ import annotations
 
+import logging
+import os
 import re
+import time
 from collections import defaultdict
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
@@ -13,7 +16,7 @@ from functools import lru_cache
 from importlib.metadata import PackageNotFoundError, version
 from logging import Logger
 from types import MappingProxyType
-from typing import Any, Final, Protocol, TypeAlias, TypeGuard, cast
+from typing import Any, Final, Protocol, TypeAlias, TypeGuard, TypeVar, cast
 
 from qubex.backend.quel1.compat.box_adapter import adapt_quel1_box
 from qubex.backend.quel1.compat.driver_loader import load_quel1_driver
@@ -46,6 +49,13 @@ SingleAwgSettingFactory: TypeAlias = Callable[..., SingleAwgSettingProtocol]
 SingleRunitIdFactory: TypeAlias = Callable[..., SingleRunitIdProtocol]
 SingleRunitSettingFactory: TypeAlias = Callable[..., SingleRunitSettingProtocol]
 SingleTriggerSettingFactory: TypeAlias = Callable[..., SingleTriggerSettingProtocol]
+_TIMING_DIAGNOSTIC_ENV_VARS: Final[tuple[str, ...]] = (
+    "QUBEX_QUEL1_TIMING_DIAGNOSTICS",
+    "QXDRIVER_QUEL1_TIMING_DIAGNOSTICS",
+)
+_TIMING_LOG_MARKER: Final[str] = "qubex_timing"
+_FALLBACK_TIMECOUNTER_TICK_SECONDS: Final[float] = 8e-9
+T = TypeVar("T")
 
 
 class _ActionBuilderProtocol(Protocol):
@@ -67,6 +77,169 @@ class _WavegenTaskProtocol(Protocol):
     def result(self) -> Any:
         """Wait for completion."""
         ...
+
+
+def _timing_diagnostics_enabled(logger: Logger) -> bool:
+    """Return True when Qubex timing diagnostics should emit records."""
+    if not logger.isEnabledFor(logging.INFO):
+        return False
+    for env_var in _TIMING_DIAGNOSTIC_ENV_VARS:
+        value = os.getenv(env_var, "")
+        if value.strip().lower() in {"1", "true", "yes", "on"}:
+            return True
+    return False
+
+
+def _read_current_timecounter(box: Any) -> tuple[int | None, str | None]:
+    """Read a box timecounter for diagnostics without failing execution."""
+    reader = getattr(box, "get_current_timecounter", None)
+    if reader is None:
+        return None, "box has no get_current_timecounter"
+    try:
+        return int(reader()), None
+    except Exception as exc:  # pragma: no cover - diagnostics only
+        return None, f"{type(exc).__name__}: {exc}"
+
+
+def _timecounter_delta_ms(box: Any, delta: int) -> float:
+    """Convert a timecounter delta to milliseconds."""
+    wss = getattr(box, "wss", None)
+    converter = getattr(wss, "timecounter_to_second", None)
+    if converter is not None:
+        try:
+            return float(converter(delta)) * 1000.0
+        except Exception:  # pragma: no cover - diagnostics fallback
+            return delta * _FALLBACK_TIMECOUNTER_TICK_SECONDS * 1000.0
+    return delta * _FALLBACK_TIMECOUNTER_TICK_SECONDS * 1000.0
+
+
+def _format_timing_value(value: Any) -> str:
+    """Format one key-value timing field."""
+    if isinstance(value, float):
+        return f"{value:.3f}"
+    if isinstance(value, int | str | bool):
+        return str(value)
+    return repr(value)
+
+
+def _entry_count(value: Any) -> int:
+    """Return len(value) for diagnostics, falling back to zero."""
+    try:
+        return len(value)
+    except TypeError:
+        return 0
+
+
+def _action_timing_fields(action: Any) -> dict[str, int]:
+    """Return common per-action timing count fields."""
+    return {
+        "awg_count": _entry_count(getattr(action, "_wseqs", ())),
+        "capture_count": _entry_count(getattr(action, "_cprms", ())),
+        "trigger_count": _entry_count(getattr(action, "_triggers", ())),
+    }
+
+
+def _action_box(action: Any | None) -> Any | None:
+    """Return an action box for diagnostics when available."""
+    return getattr(action, "box", None)
+
+
+def _log_timing_event(
+    logger: Logger,
+    event: str,
+    *,
+    phase: str,
+    box: Any | None = None,
+    box_name: str | None = None,
+    timecounter: int | None = None,
+    current_timecounter: int | None = None,
+    elapsed_ms: float | None = None,
+    **fields: Any,
+) -> None:
+    """Log one Qubex timing diagnostic event when diagnostics are enabled."""
+    if not _timing_diagnostics_enabled(logger):
+        return
+
+    current_error = None
+    remaining_ms = None
+    if box is not None and timecounter is not None:
+        if current_timecounter is None:
+            current_timecounter, current_error = _read_current_timecounter(box)
+        if current_timecounter is not None:
+            remaining_ms = _timecounter_delta_ms(box, timecounter - current_timecounter)
+
+    parts = [_TIMING_LOG_MARKER, f"event={event}"]
+    if box_name is not None:
+        parts.append(f"box={box_name}")
+    if elapsed_ms is not None:
+        parts.append(f"elapsed_ms={elapsed_ms:.3f}")
+    if timecounter is not None:
+        parts.append(f"timecounter={timecounter}")
+    if current_timecounter is not None:
+        parts.append(f"current_timecounter={current_timecounter}")
+    if remaining_ms is not None:
+        parts.append(f"remaining_ms={remaining_ms:.3f}")
+    if current_error is not None:
+        parts.append(f"current_timecounter_error={current_error!r}")
+    parts.append(f"phase={phase}")
+    for key in sorted(fields):
+        value = fields[key]
+        if value is not None:
+            parts.append(f"{key}={_format_timing_value(value)}")
+
+    logger.info(" ".join(parts))
+
+
+def _timed_call(
+    logger: Logger,
+    event: str,
+    call: Callable[[], T],
+    *,
+    box: Any | None = None,
+    box_name: str | None = None,
+    timecounter: int | None = None,
+    **fields: Any,
+) -> T:
+    """Run a call while emitting Qubex timing diagnostics when enabled."""
+    if not _timing_diagnostics_enabled(logger):
+        return call()
+
+    _log_timing_event(
+        logger,
+        event,
+        box=box,
+        box_name=box_name,
+        timecounter=timecounter,
+        phase="start",
+        **fields,
+    )
+    started = time.perf_counter()
+    try:
+        result = call()
+    except Exception as exc:
+        _log_timing_event(
+            logger,
+            event,
+            box=box,
+            box_name=box_name,
+            timecounter=timecounter,
+            elapsed_ms=(time.perf_counter() - started) * 1000.0,
+            phase="error",
+            error=f"{type(exc).__name__}: {exc}",
+            **fields,
+        )
+        raise
+    _log_timing_event(
+        logger,
+        event,
+        box=box,
+        box_name=box_name,
+        timecounter=timecounter,
+        elapsed_ms=(time.perf_counter() - started) * 1000.0,
+        phase="end",
+        **fields,
+    )
+    return result
 
 
 def _is_runit_setting_shape(
@@ -531,30 +704,77 @@ class QubexMultiAction:
         scheduled_times: Mapping[str, int] | None = None,
     ) -> dict[str, dict[PortType, Any]]:
         """Start capture for boxes that include capture settings."""
+        submitted_at = time.perf_counter()
 
         def _start_capture(
             name: str, action: SingleActionProtocol
         ) -> dict[PortType, Any]:
+            scheduled_time = (
+                scheduled_times[name]
+                if (
+                    self._arm_triggered_boxes_at_capture_start
+                    and scheduled_times is not None
+                    and getattr(action, "_triggers", {})
+                )
+                else None
+            )
+            queue_wait_ms = (time.perf_counter() - submitted_at) * 1000.0
+            fields = {
+                "queue_wait_ms": queue_wait_ms,
+                **_action_timing_fields(action),
+            }
             if (
                 self._arm_triggered_boxes_at_capture_start
                 and scheduled_times is not None
                 and getattr(action, "_triggers", {})
             ):
-                return cast(Any, action).capture_start(
-                    timecounter=scheduled_times[name]
+                scheduled_time = cast(int, scheduled_time)
+                return _timed_call(
+                    self._logger,
+                    "qubex.multi.capture_start.box",
+                    lambda scheduled_time=scheduled_time: cast(
+                        Any, action
+                    ).capture_start(timecounter=scheduled_time),
+                    box=_action_box(action),
+                    box_name=name,
+                    timecounter=scheduled_time,
+                    **fields,
                 )
-            return action.capture_start()
+            return _timed_call(
+                self._logger,
+                "qubex.multi.capture_start.box",
+                action.capture_start,
+                box=_action_box(action),
+                box_name=name,
+                **fields,
+            )
 
         capture_actions = [
             (name, action)
             for name, action in self._actions.items()
             if self._has_capture_setting(action)
         ]
+        reference_action = self._actions.get(self._reference_box_name)
+        reference_time = (
+            scheduled_times[self._reference_box_name]
+            if scheduled_times is not None
+            and self._reference_box_name in scheduled_times
+            else None
+        )
         return cast(
             dict[str, dict[PortType, Any]],
-            _run_per_box_parallel(
-                capture_actions,
-                _start_capture,
+            _timed_call(
+                self._logger,
+                "qubex.multi.capture_start.all",
+                lambda: _run_per_box_parallel(
+                    capture_actions,
+                    _start_capture,
+                ),
+                box=_action_box(reference_action),
+                box_name=self._reference_box_name,
+                timecounter=reference_time,
+                box_count=len(capture_actions),
+                total_box_count=len(self._actions),
             ),
         )
 
@@ -566,11 +786,36 @@ class QubexMultiAction:
         dict[tuple[str, PortType, int], Any],
     ]:
         """Stop capture and flatten per-box status/data maps."""
+        submitted_at = time.perf_counter()
+
+        def _stop_capture(
+            name: str,
+            future: dict[PortType, Any],
+        ) -> tuple[dict[PortType, Any], dict[tuple[PortType, int], Any]]:
+            action = self._actions[name]
+            queue_wait_ms = (time.perf_counter() - submitted_at) * 1000.0
+            return _timed_call(
+                self._logger,
+                "qubex.multi.capture_stop.box",
+                lambda: action.capture_stop(future),
+                box=_action_box(action),
+                box_name=name,
+                queue_wait_ms=queue_wait_ms,
+                future_count=len(future),
+                **_action_timing_fields(action),
+            )
+
         box_results = cast(
             dict[str, tuple[dict[PortType, Any], dict[tuple[PortType, int], Any]]],
-            _run_per_box_parallel(
-                list(futures.items()),
-                lambda name, future: self._actions[name].capture_stop(future),
+            _timed_call(
+                self._logger,
+                "qubex.multi.capture_stop.all",
+                lambda: _run_per_box_parallel(
+                    list(futures.items()),
+                    _stop_capture,
+                ),
+                box_count=len(futures),
+                total_box_count=len(self._actions),
             ),
         )
         status: dict[tuple[str, PortType], Any] = {}
@@ -589,15 +834,30 @@ class QubexMultiAction:
         dict[tuple[str, PortType, int], Any],
     ]:
         """Run capture start -> timed emission reservation -> capture stop."""
-        scheduled_times = self._build_scheduled_times(
-            displacement=self._system.displacement
+        reference_action = self._actions.get(self._reference_box_name)
+
+        def _run_action() -> tuple[
+            dict[tuple[str, PortType], Any],
+            dict[tuple[str, PortType, int], Any],
+        ]:
+            scheduled_times = self._build_scheduled_times(
+                displacement=self._system.displacement
+            )
+            futures = self.capture_start(scheduled_times=scheduled_times)
+            self.emit_at(
+                displacement=self._system.displacement,
+                scheduled_times=scheduled_times,
+            )
+            return self.capture_stop(futures)
+
+        return _timed_call(
+            self._logger,
+            "qubex.multi.action",
+            _run_action,
+            box=_action_box(reference_action),
+            box_name=self._reference_box_name,
+            box_count=len(self._actions),
         )
-        futures = self.capture_start(scheduled_times=scheduled_times)
-        self.emit_at(
-            displacement=self._system.displacement,
-            scheduled_times=scheduled_times,
-        )
-        return self.capture_stop(futures)
 
     def _build_scheduled_times(
         self,
@@ -606,36 +866,81 @@ class QubexMultiAction:
         displacement: int = 0,
     ) -> dict[str, int]:
         """Compute synchronized emission times for all boxes."""
-        reference_box = adapt_quel1_box(self._system.box[self._reference_box_name])
+        reference_box: Any | None = None
+        current_time: int | None = None
+        started = time.perf_counter()
+        _log_timing_event(
+            self._logger,
+            "qubex.multi.build_scheduled_times",
+            box_name=self._reference_box_name,
+            phase="start",
+            box_count=len(self._actions),
+            displacement=displacement,
+            min_time_offset=min_time_offset,
+        )
+        try:
+            reference_box = adapt_quel1_box(self._system.box[self._reference_box_name])
 
-        if self._clock_options.validate_sysref_fluctuation_on_emit:
-            for name, action in self._actions.items():
-                last_sysref = action.box.get_latest_sysref_timecounter()
-                self._logger.debug(
-                    f"sysref offset of {name}: latest: {self._mod_by_sysref(last_sysref)}"
+            if self._clock_options.validate_sysref_fluctuation_on_emit:
+                for name, action in self._actions.items():
+                    last_sysref = action.box.get_latest_sysref_timecounter()
+                    self._logger.debug(
+                        f"sysref offset of {name}: latest: {self._mod_by_sysref(last_sysref)}"
+                    )
+                current_time = reference_box.get_current_timecounter()
+                last_sysref = reference_box.get_latest_sysref_timecounter()
+                fluctuation = (
+                    self._mod_by_sysref(last_sysref) - self._ref_sysref_time_offset
                 )
-            current_time = reference_box.get_current_timecounter()
-            last_sysref = reference_box.get_latest_sysref_timecounter()
-            fluctuation = (
-                self._mod_by_sysref(last_sysref) - self._ref_sysref_time_offset
+                if abs(fluctuation) > 4:
+                    self._logger.warning(
+                        "large fluctuation (= %s) of sysref is detected from the previous timing measurement",
+                        fluctuation,
+                    )
+            else:
+                current_time = reference_box.get_current_timecounter()
+
+            current_time = cast(int, current_time)
+            base_time = current_time + min_time_offset
+            align_offset = (16 - (base_time - self._ref_sysref_time_offset) % 16) % 16
+            base_time += align_offset + displacement + self.TIMING_OFFSET
+
+            timing_shift = self._system.timing_shift
+            scheduled_times = {
+                name: base_time + self._estimated_timediff[name] + timing_shift[name]
+                for name in self._actions
+            }
+        except Exception as exc:
+            _log_timing_event(
+                self._logger,
+                "qubex.multi.build_scheduled_times",
+                box=reference_box,
+                box_name=self._reference_box_name,
+                current_timecounter=current_time,
+                elapsed_ms=(time.perf_counter() - started) * 1000.0,
+                phase="error",
+                error=f"{type(exc).__name__}: {exc}",
+                box_count=len(self._actions),
+                displacement=displacement,
+                min_time_offset=min_time_offset,
             )
-            if abs(fluctuation) > 4:
-                self._logger.warning(
-                    "large fluctuation (= %s) of sysref is detected from the previous timing measurement",
-                    fluctuation,
-                )
-        else:
-            current_time = reference_box.get_current_timecounter()
-
-        base_time = current_time + min_time_offset
-        align_offset = (16 - (base_time - self._ref_sysref_time_offset) % 16) % 16
-        base_time += align_offset + displacement + self.TIMING_OFFSET
-
-        timing_shift = self._system.timing_shift
-        return {
-            name: base_time + self._estimated_timediff[name] + timing_shift[name]
-            for name in self._actions
-        }
+            raise
+        _log_timing_event(
+            self._logger,
+            "qubex.multi.build_scheduled_times",
+            box=reference_box,
+            box_name=self._reference_box_name,
+            timecounter=scheduled_times.get(self._reference_box_name),
+            current_timecounter=current_time,
+            elapsed_ms=(time.perf_counter() - started) * 1000.0,
+            phase="end",
+            align_offset=align_offset,
+            box_count=len(self._actions),
+            displacement=displacement,
+            min_time_offset=min_time_offset,
+            scheduled_times=scheduled_times,
+        )
+        return scheduled_times
 
     def emit_at(
         self,
@@ -650,42 +955,103 @@ class QubexMultiAction:
         When clock validation is enabled, this method performs additional
         latched-clock reads and fluctuation checks before scheduling emission.
         """
-        awgs_by_box = {
-            name: {(spec.port, spec.channel) for spec in action._wseqs}
-            for name, action in self._actions.items()
-        }
-        resolved_scheduled_times = (
-            dict(scheduled_times)
+        reference_action = self._actions.get(self._reference_box_name)
+        reference_time = (
+            scheduled_times[self._reference_box_name]
             if scheduled_times is not None
-            else self._build_scheduled_times(
-                min_time_offset=min_time_offset,
-                displacement=displacement,
-            )
+            and self._reference_box_name in scheduled_times
+            else None
         )
-        tasks: list[_WavegenTaskProtocol] = []
-        for name, action in self._actions.items():
-            if not self._emit_triggered_boxes and getattr(action, "_triggers", {}):
-                continue
-            scheduled_time = resolved_scheduled_times[name]
-            if awgs_by_box[name]:
-                tasks.append(
-                    action.box.start_wavegen(
-                        awgs_by_box[name],
-                        timecounter=scheduled_time,
-                    )
+
+        def _run_emit_at() -> None:
+            awgs_by_box = {
+                name: {(spec.port, spec.channel) for spec in action._wseqs}
+                for name, action in self._actions.items()
+            }
+            resolved_scheduled_times = (
+                dict(scheduled_times)
+                if scheduled_times is not None
+                else self._build_scheduled_times(
+                    min_time_offset=min_time_offset,
+                    displacement=displacement,
                 )
-            self._logger.debug(
-                "reserving emission of %s at %s : base_time=%s, timediff=%s, timing_shift=%s",
-                name,
-                scheduled_time,
-                scheduled_time
-                - self._estimated_timediff[name]
-                - self._system.timing_shift[name],
-                self._estimated_timediff[name],
-                self._system.timing_shift[name],
             )
-        for task in tasks:
-            task.result()
+            tasks: list[
+                tuple[str, SingleActionProtocol, int, _WavegenTaskProtocol]
+            ] = []
+            for name, action in self._actions.items():
+                awgs = awgs_by_box[name]
+                if not self._emit_triggered_boxes and getattr(action, "_triggers", {}):
+                    _log_timing_event(
+                        self._logger,
+                        "qubex.multi.emit_at.box",
+                        box=_action_box(action),
+                        box_name=name,
+                        phase="skip",
+                        reason="triggered_box",
+                        **_action_timing_fields(action),
+                    )
+                    continue
+                scheduled_time = resolved_scheduled_times[name]
+                if awgs:
+                    task = _timed_call(
+                        self._logger,
+                        "qubex.multi.emit_at.box",
+                        lambda action=action, awgs=awgs, scheduled_time=scheduled_time: (
+                            action.box.start_wavegen(
+                                awgs,
+                                timecounter=scheduled_time,
+                            )
+                        ),
+                        box=_action_box(action),
+                        box_name=name,
+                        timecounter=scheduled_time,
+                        **_action_timing_fields(action),
+                    )
+                    tasks.append((name, action, scheduled_time, task))
+                else:
+                    _log_timing_event(
+                        self._logger,
+                        "qubex.multi.emit_at.box",
+                        box=_action_box(action),
+                        box_name=name,
+                        timecounter=scheduled_time,
+                        phase="skip",
+                        reason="no_wave_sequences",
+                        **_action_timing_fields(action),
+                    )
+                self._logger.debug(
+                    "reserving emission of %s at %s : base_time=%s, timediff=%s, timing_shift=%s",
+                    name,
+                    scheduled_time,
+                    scheduled_time
+                    - self._estimated_timediff[name]
+                    - self._system.timing_shift[name],
+                    self._estimated_timediff[name],
+                    self._system.timing_shift[name],
+                )
+            for name, action, scheduled_time, task in tasks:
+                _timed_call(
+                    self._logger,
+                    "qubex.multi.emit_at.task_result",
+                    task.result,
+                    box=_action_box(action),
+                    box_name=name,
+                    timecounter=scheduled_time,
+                    **_action_timing_fields(action),
+                )
+
+        _timed_call(
+            self._logger,
+            "qubex.multi.emit_at.all",
+            _run_emit_at,
+            box=_action_box(reference_action),
+            box_name=self._reference_box_name,
+            timecounter=reference_time,
+            box_count=len(self._actions),
+            displacement=displacement,
+            min_time_offset=min_time_offset,
+        )
 
 
 def build_parallel_multi_action(
