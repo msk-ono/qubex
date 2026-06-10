@@ -363,7 +363,6 @@ class Quel3ExecutionManager:
         for payload in payloads:
             resolved_payload = self._resolve_execution_payload(
                 payload=payload,
-                resolver=resolver,
             )
             session_state = await self._open_payload_execution_session(
                 resolver=resolver,
@@ -384,13 +383,9 @@ class Quel3ExecutionManager:
         self,
         *,
         payload: Quel3ExecutionPayload,
-        resolver: InstrumentResolverProtocol,
     ) -> Quel3ExecutionPayload:
         """Resolve one payload to concrete runnable aliases."""
-        resolved_payload = self._resolve_payload(
-            payload=payload,
-            resolver=resolver,
-        )
+        resolved_payload = self._resolve_payload(payload=payload)
         return self._filter_runnable_payload(resolved_payload)
 
     async def _open_payload_execution_session(
@@ -402,14 +397,15 @@ class Quel3ExecutionManager:
     ) -> _PayloadExecutionSession:
         """Open a payload session and rebuild session-bound drivers."""
         aliases = tuple(sorted(resolved_payload.fixed_timelines))
-        alias_to_resource_id = self._resolve_alias_to_resource_id_map(
+        alias_to_instrument_info = self._resolve_alias_to_instrument_info_map(
             resolver=resolver,
             aliases=aliases,
         )
         instrument_resource_ids = self._resource_ids_for_aliases(
-            alias_to_resource_id=alias_to_resource_id,
+            alias_to_instrument_info=alias_to_instrument_info,
             aliases=aliases,
         )
+        alias_to_resource_id = dict(zip(aliases, instrument_resource_ids, strict=True))
         session_token = self._active_session_token()
         try:
             session = await self._session_manager.reopen_session(
@@ -430,7 +426,7 @@ class Quel3ExecutionManager:
 
         alias_to_driver = self._build_alias_driver_map(
             session=session,
-            resolver=resolver,
+            alias_to_instrument_info=alias_to_instrument_info,
             aliases=aliases,
             quelware_api=quelware_api,
         )
@@ -484,33 +480,37 @@ class Quel3ExecutionManager:
     @staticmethod
     def _resource_ids_for_aliases(
         *,
-        alias_to_resource_id: dict[str, ResourceIdProtocol],
+        alias_to_instrument_info: dict[str, InstrumentInfoProtocol],
         aliases: Sequence[str],
     ) -> tuple[ResourceIdProtocol, ...]:
         """Return resource IDs for aliases with a clear missing-alias error."""
-        try:
-            return tuple(alias_to_resource_id[alias] for alias in aliases)
-        except KeyError as exc:
-            alias = str(exc.args[0])
-            raise ValueError(
-                f"Instrument resource ID is not resolved for alias `{alias}`."
-            ) from exc
+        resource_ids: list[ResourceIdProtocol] = []
+        for alias in aliases:
+            try:
+                resource_id = alias_to_instrument_info[alias].id
+            except KeyError as exc:
+                raise ValueError(
+                    f"Instrument resource ID is not resolved for alias `{alias}`."
+                ) from exc
+            if len(resource_id) == 0:
+                raise ValueError(
+                    f"Instrument resource ID is not resolved for alias `{alias}`."
+                )
+            resource_ids.append(resource_id)
+        return tuple(resource_ids)
 
     def _build_alias_driver_map(
         self,
         *,
         session: SessionProtocol,
-        resolver: InstrumentResolverProtocol,
+        alias_to_instrument_info: dict[str, InstrumentInfoProtocol],
         aliases: Sequence[str],
         quelware_api: _QuelwareExecutionApi,
     ) -> dict[str, InstrumentDriverProtocol]:
         """Build session-bound fixed-timeline drivers by instrument alias."""
         alias_to_driver: dict[str, InstrumentDriverProtocol] = {}
         for alias in aliases:
-            instrument_info = self._find_instrument_info_by_alias(
-                resolver=resolver,
-                alias=alias,
-            )
+            instrument_info = alias_to_instrument_info[alias]
             try:
                 driver = quelware_api.fixed_timeline_driver_factory(
                     session,
@@ -674,38 +674,30 @@ class Quel3ExecutionManager:
         return alias_results
 
     @classmethod
-    def _resolve_alias_to_resource_id_map(
+    def _resolve_alias_to_instrument_info_map(
         cls,
         *,
         resolver: InstrumentResolverProtocol,
         aliases: Sequence[str],
-    ) -> dict[str, ResourceIdProtocol]:
-        """Resolve alias-to-resource-id mapping using InstrumentResolver."""
-        alias_to_resource_id: dict[str, ResourceIdProtocol] = {}
+    ) -> dict[str, InstrumentInfoProtocol]:
+        """Resolve instrument infos by runtime alias using InstrumentResolver."""
+        alias_to_instrument_info: dict[str, InstrumentInfoProtocol] = {}
         for alias in aliases:
             instrument_info = cls._find_instrument_info_by_alias(
                 resolver=resolver,
                 alias=alias,
             )
-            resource_id = instrument_info.id
-            if isinstance(resource_id, str) and len(resource_id) > 0:
-                alias_to_resource_id[alias] = resource_id
-
-        return alias_to_resource_id
+            alias_to_instrument_info[alias] = instrument_info
+        return alias_to_instrument_info
 
     @classmethod
     def _resolve_payload(
         cls,
         *,
         payload: Quel3ExecutionPayload,
-        resolver: InstrumentResolverProtocol,
     ) -> Quel3ExecutionPayload:
         """Resolve timeline bindings to concrete instrument aliases."""
-        bindings = (
-            payload.instrument_bindings
-            if len(payload.instrument_bindings) > 0
-            else {key: f"alias:{key}" for key in payload.fixed_timelines}
-        )
+        bindings = payload.instrument_bindings
 
         alias_to_events: dict[str, list[tuple[int, Quel3WaveformEvent]]] = defaultdict(
             list
@@ -720,18 +712,14 @@ class Quel3ExecutionManager:
 
         for target, timeline in payload.fixed_timelines.items():
             binding = bindings.get(target)
-            if binding is None:
+            if binding is None and len(bindings) > 0:
                 raise ValueError(
                     f"Instrument binding is not configured for target `{target}`."
                 )
-            capture_port_binding = payload.capture_port_bindings.get(target)
-            alias = cls._resolve_alias_from_binding(
-                target=target,
-                resolver=resolver,
-                binding=binding,
-                capture_port_binding=capture_port_binding,
-                has_events=len(timeline.events) > 0,
-                has_captures=len(timeline.capture_windows) > 0,
+            alias = (
+                target
+                if binding is None
+                else cls._resolve_alias_from_binding(binding=binding)
             )
             alias_to_length_ns[alias] = max(
                 alias_to_length_ns.get(alias, 0.0),
@@ -824,32 +812,19 @@ class Quel3ExecutionManager:
     def _resolve_alias_from_binding(
         cls,
         *,
-        target: str,
-        resolver: InstrumentResolverProtocol,
         binding: str,
-        capture_port_binding: str | None,
-        has_events: bool,
-        has_captures: bool,
     ) -> str:
         """Resolve one target binding to one instrument alias with fail-fast rules."""
-        del target, capture_port_binding, has_events, has_captures
         if binding.startswith("alias:"):
             alias = binding.removeprefix("alias:").strip()
             if len(alias) == 0:
                 raise ValueError("Empty alias binding is not allowed.")
-            try:
-                instrument_info = cls._find_instrument_info_by_alias(
-                    resolver=resolver,
-                    alias=alias,
-                )
-            except ValueError as exc:
+            _local_alias, unit_label = cls._split_unit_qualified_alias(alias)
+            if unit_label is None:
                 raise ValueError(
-                    f"Instrument alias `{alias}` could not be resolved."
-                ) from exc
-            return cls._runtime_alias_from_instrument_info(
-                instrument_info=instrument_info,
-                fallback_alias=alias,
-            )
+                    f"QuEL-3 alias binding must include a unit label: `{binding}`."
+                )
+            return alias
         raise ValueError(f"Unsupported instrument binding: `{binding}`.")
 
     @classmethod
@@ -862,13 +837,10 @@ class Quel3ExecutionManager:
         """Find one instrument info, passing unit when the alias is unit-qualified."""
         local_alias, alias_unit_label = cls._split_unit_qualified_alias(alias)
         if alias_unit_label is not None:
-            try:
-                return resolver.find_inst_info_by_alias(
-                    local_alias,
-                    unit=alias_unit_label,
-                )
-            except TypeError:
-                return resolver.find_inst_info_by_alias(alias)
+            return resolver.find_inst_info_by_alias(
+                local_alias,
+                unit=alias_unit_label,
+            )
         return resolver.find_inst_info_by_alias(alias)
 
     @staticmethod
@@ -879,19 +851,6 @@ class Quel3ExecutionManager:
         if separator and len(unit_label) > 0 and len(local_alias) > 0:
             return local_alias, unit_label
         return stripped_alias, None
-
-    @staticmethod
-    def _runtime_alias_from_instrument_info(
-        *,
-        instrument_info: InstrumentInfoProtocol,
-        fallback_alias: str,
-    ) -> str:
-        """Return the runtime alias stored on one runtime instrument info."""
-        definition = instrument_info.definition
-        alias = definition.alias
-        if isinstance(alias, str) and len(alias.strip()) > 0:
-            return alias.strip()
-        return fallback_alias
 
     @staticmethod
     def _initialize_shot_samples(
