@@ -4,10 +4,12 @@
 
 from __future__ import annotations
 
+import gc
 import re
 from collections import defaultdict
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from dataclasses import dataclass
 from functools import lru_cache
 from importlib.metadata import PackageNotFoundError, version
@@ -67,6 +69,37 @@ class _WavegenTaskProtocol(Protocol):
     def result(self) -> Any:
         """Wait for completion."""
         ...
+
+
+@contextmanager
+def gc_disabled(
+    *,
+    collect_before: bool = False,
+    collect_after: bool = False,
+) -> Iterator[None]:
+    """
+    Temporarily disable cyclic garbage collection.
+
+    Notes
+    -----
+    This changes the process-wide CPython cyclic GC state while active.
+    """
+    was_enabled = gc.isenabled()
+
+    if collect_before:
+        gc.collect()
+
+    if was_enabled:
+        gc.disable()
+
+    try:
+        yield
+    finally:
+        if was_enabled:
+            gc.enable()
+
+        if collect_after:
+            gc.collect()
 
 
 def _is_runit_setting_shape(
@@ -589,14 +622,15 @@ class QubexMultiAction:
         dict[tuple[str, PortType, int], Any],
     ]:
         """Run capture start -> timed emission reservation -> capture stop."""
-        scheduled_times = self._build_scheduled_times(
-            displacement=self._system.displacement
-        )
-        futures = self.capture_start(scheduled_times=scheduled_times)
-        self.emit_at(
-            displacement=self._system.displacement,
-            scheduled_times=scheduled_times,
-        )
+        with gc_disabled():
+            scheduled_times = self._build_scheduled_times(
+                displacement=self._system.displacement
+            )
+            futures = self.capture_start(scheduled_times=scheduled_times)
+            self.emit_at(
+                displacement=self._system.displacement,
+                scheduled_times=scheduled_times,
+            )
         return self.capture_stop(futures)
 
     def _build_scheduled_times(
