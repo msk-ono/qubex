@@ -1780,6 +1780,48 @@ def test_execute_batch_async_reopens_session_per_payload(
     assert len(results) == 2
 
 
+def test_execute_batch_once_prints_diagnostic_timing(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Given QuEL-3 execution, batch timing diagnostics are printed."""
+    payload = _make_payload()
+    manager = Quel3ExecutionManager(
+        runtime_config=Quel3RuntimeConfig(),
+        sampling_period_ns=0.4,
+        capture_decimation_factor=4,
+    )
+    resolver = _FakeInstrumentResolver(
+        alias_to_info={
+            "alias-rq00": _FakeInstrumentInfo(
+                port_id="quel3-02-a01:trx_p00",
+                definition=_FakeInstrumentDefinition(role="TRANSCEIVER"),
+            )
+        }
+    )
+    driver = _FakeInstrumentDriver()
+    session = _FakeSession()
+    client = _FakeClient(session)
+
+    monkeypatch.setattr(
+        manager,
+        "_load_quelware_api",
+        lambda: _make_fake_execution_api(
+            client_factory=lambda endpoint, port: client,
+            instrument_resolver_factory=lambda: resolver,
+            fixed_timeline_driver_factory=lambda _session, _instrument_info: driver,
+        ),
+    )
+
+    asyncio.run(manager.execute_async(request=BackendExecutionRequest(payload=payload)))
+
+    output = capsys.readouterr().out
+    assert "[qubex][quel3 timing] start batch payloads=1 parallel=True" in output
+    assert "batch.open_session_manager" in output
+    assert "payload[0].execute_resolved_payload.session.trigger" in output
+    assert "[qubex][quel3 timing] summary total=" in output
+
+
 def test_execute_serializes_driver_phases_when_parallel_disabled(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

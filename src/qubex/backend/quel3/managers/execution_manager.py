@@ -5,8 +5,10 @@ from __future__ import annotations
 import asyncio
 import importlib
 import logging
+import time
 from collections import defaultdict
-from collections.abc import Awaitable, Callable, Collection, Sequence
+from collections.abc import Awaitable, Callable, Collection, Iterator, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from typing import TypeGuard, TypeVar, cast
 
@@ -53,6 +55,85 @@ T = TypeVar("T")
 QUEL3_SESSION_REQUEST_MAX_ATTEMPTS = 4
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class _Quel3TimingEvent:
+    """One ad hoc timing event emitted during QuEL-3 batch execution."""
+
+    label: str
+    elapsed_ns: int
+    total_ns: int
+
+
+class _Quel3BatchExecutionTimer:
+    """Print ad hoc timing diagnostics for one QuEL-3 batch attempt."""
+
+    def __init__(self, *, payload_count: int, parallel: bool) -> None:
+        self._started_ns = time.perf_counter_ns()
+        self._events: list[_Quel3TimingEvent] = []
+        print(
+            "[qubex][quel3 timing] "
+            f"start batch payloads={payload_count} parallel={parallel}",
+            flush=True,
+        )
+
+    @contextmanager
+    def section(self, label: str) -> Iterator[None]:
+        """Measure and print one named execution section."""
+        started_ns = time.perf_counter_ns()
+        try:
+            yield
+        finally:
+            ended_ns = time.perf_counter_ns()
+            elapsed_ns = ended_ns - started_ns
+            total_ns = ended_ns - self._started_ns
+            self._events.append(
+                _Quel3TimingEvent(
+                    label=label,
+                    elapsed_ns=elapsed_ns,
+                    total_ns=total_ns,
+                )
+            )
+            print(
+                "[qubex][quel3 timing] "
+                f"{label}: {self._format(elapsed_ns)} "
+                f"(total={self._format(total_ns)})",
+                flush=True,
+            )
+
+    def print_summary(self) -> None:
+        """Print all captured sections and the current total duration."""
+        total_ns = time.perf_counter_ns() - self._started_ns
+        print(
+            "[qubex][quel3 timing] "
+            f"summary total={self._format(total_ns)} sections={len(self._events)}",
+            flush=True,
+        )
+        for index, event in enumerate(self._events, start=1):
+            print(
+                "[qubex][quel3 timing] "
+                f"  {index:02d}. {event.label}: {self._format(event.elapsed_ns)} "
+                f"(total={self._format(event.total_ns)})",
+                flush=True,
+            )
+
+    @staticmethod
+    def _format(duration_ns: int) -> str:
+        return f"{duration_ns / 1_000_000:.3f} ms"
+
+
+@contextmanager
+def _timed_section(
+    timer: _Quel3BatchExecutionTimer | None,
+    label: str,
+) -> Iterator[None]:
+    """Measure one section when a diagnostic timer is active."""
+    if timer is None:
+        yield
+    else:
+        with timer.section(label):
+            yield
 
 
 def _run_async(
@@ -325,42 +406,78 @@ class Quel3ExecutionManager:
         # 2. Resolve each runnable payload from logical targets to instrument aliases.
         # 3. Reopen a session for the payload's resolved instrument resource IDs.
         # 4. Build drivers/sequencer directives, trigger the session, and collect results.
-        await self._session_manager.open(client_factory=quelware_api.client_factory)
-        resolver = quelware_api.instrument_resolver_factory()
-        await resolver.refresh(self._session_manager.client)
+        timer = _Quel3BatchExecutionTimer(
+            payload_count=len(payloads),
+            parallel=parallel,
+        )
+        try:
+            with _timed_section(timer, "batch.open_session_manager"):
+                await self._session_manager.open(
+                    client_factory=quelware_api.client_factory
+                )
+            with _timed_section(timer, "batch.create_instrument_resolver"):
+                resolver = quelware_api.instrument_resolver_factory()
+            with _timed_section(timer, "batch.refresh_instrument_resolver"):
+                await resolver.refresh(self._session_manager.client)
 
-        results = []
-        for payload in payloads:
-            runnable_payload = self._filter_runnable_payload(payload)
-            resolved_payload = self._resolve_payload(payload=runnable_payload)
-            aliases = tuple(sorted(resolved_payload.fixed_timelines.keys()))
-            aliases_with_captures = frozenset(
-                alias
-                for alias, timeline in resolved_payload.fixed_timelines.items()
-                if len(timeline.capture_windows) > 0
-            )
-            alias_to_instrument_info = {
-                alias: self._find_instrument_info_by_alias(
-                    resolver=resolver,
-                    alias=alias,
-                )
-                for alias in aliases
-            }
-            session_state = await self._open_payload_execution_session(
-                alias_to_instrument_info=alias_to_instrument_info,
-                aliases=aliases,
-                aliases_with_captures=aliases_with_captures,
-                quelware_api=quelware_api,
-            )
-            results.append(
-                await self._execute_resolved_payload(
-                    payload=resolved_payload,
-                    session_state=session_state,
-                    quelware_api=quelware_api,
-                    parallel=parallel,
-                )
-            )
-        return results
+            results = []
+            for payload_index, payload in enumerate(payloads):
+                timing_prefix = f"payload[{payload_index}]"
+                with _timed_section(
+                    timer,
+                    f"{timing_prefix}.filter_runnable_payload",
+                ):
+                    runnable_payload = self._filter_runnable_payload(payload)
+                with _timed_section(timer, f"{timing_prefix}.resolve_payload"):
+                    resolved_payload = self._resolve_payload(payload=runnable_payload)
+                with _timed_section(timer, f"{timing_prefix}.collect_alias_sets"):
+                    aliases = tuple(sorted(resolved_payload.fixed_timelines.keys()))
+                    aliases_with_captures = frozenset(
+                        alias
+                        for alias, timeline in resolved_payload.fixed_timelines.items()
+                        if len(timeline.capture_windows) > 0
+                    )
+                with _timed_section(
+                    timer,
+                    f"{timing_prefix}.find_instrument_info_by_alias",
+                ):
+                    alias_to_instrument_info = {
+                        alias: self._find_instrument_info_by_alias(
+                            resolver=resolver,
+                            alias=alias,
+                        )
+                        for alias in aliases
+                    }
+                with _timed_section(
+                    timer,
+                    f"{timing_prefix}.open_payload_execution_session.total",
+                ):
+                    session_state = await self._open_payload_execution_session(
+                        alias_to_instrument_info=alias_to_instrument_info,
+                        aliases=aliases,
+                        aliases_with_captures=aliases_with_captures,
+                        quelware_api=quelware_api,
+                        timer=timer,
+                        timing_prefix=(
+                            f"{timing_prefix}.open_payload_execution_session"
+                        ),
+                    )
+                with _timed_section(
+                    timer,
+                    f"{timing_prefix}.execute_resolved_payload.total",
+                ):
+                    result = await self._execute_resolved_payload(
+                        payload=resolved_payload,
+                        session_state=session_state,
+                        quelware_api=quelware_api,
+                        parallel=parallel,
+                        timer=timer,
+                        timing_prefix=f"{timing_prefix}.execute_resolved_payload",
+                    )
+                results.append(result)
+            return results
+        finally:
+            timer.print_summary()
 
     async def _open_payload_execution_session(
         self,
@@ -369,27 +486,33 @@ class Quel3ExecutionManager:
         aliases: Sequence[str],
         aliases_with_captures: Collection[str],
         quelware_api: _QuelwareExecutionApi,
+        timer: _Quel3BatchExecutionTimer | None = None,
+        timing_prefix: str = "open_payload_execution_session",
     ) -> _PayloadExecutionSession:
         """Open a payload session and rebuild session-bound drivers."""
         instrument_resource_ids: list[ResourceIdProtocol] = []
-        for alias in aliases:
-            try:
-                resource_id = alias_to_instrument_info[alias].id
-            except KeyError as exc:
-                raise ValueError(
-                    f"Instrument resource ID is not resolved for alias `{alias}`."
-                ) from exc
-            if len(resource_id) == 0:
-                raise ValueError(
-                    f"Instrument resource ID is not resolved for alias `{alias}`."
-                )
-            instrument_resource_ids.append(resource_id)
-        alias_to_resource_id = dict(zip(aliases, instrument_resource_ids, strict=True))
+        with _timed_section(timer, f"{timing_prefix}.collect_resource_ids"):
+            for alias in aliases:
+                try:
+                    resource_id = alias_to_instrument_info[alias].id
+                except KeyError as exc:
+                    raise ValueError(
+                        f"Instrument resource ID is not resolved for alias `{alias}`."
+                    ) from exc
+                if len(resource_id) == 0:
+                    raise ValueError(
+                        f"Instrument resource ID is not resolved for alias `{alias}`."
+                    )
+                instrument_resource_ids.append(resource_id)
+            alias_to_resource_id = dict(
+                zip(aliases, instrument_resource_ids, strict=True)
+            )
         session_token = self._active_session_token()
         try:
-            session = await self._session_manager.reopen_session(
-                tuple(instrument_resource_ids),
-            )
+            with _timed_section(timer, f"{timing_prefix}.reopen_session"):
+                session = await self._session_manager.reopen_session(
+                    tuple(instrument_resource_ids),
+                )
         except QuelwareSessionError:
             raise
         except Exception as exc:
@@ -404,24 +527,26 @@ class Quel3ExecutionManager:
             )
 
         alias_to_driver: dict[str, InstrumentDriverProtocol] = {}
-        for alias in aliases:
-            instrument_info = alias_to_instrument_info[alias]
-            try:
-                driver = quelware_api.fixed_timeline_driver_factory(
-                    session,
-                    instrument_info,
-                )
-            except Exception as exc:
-                raise RuntimeError(
-                    "QuEL-3 fixed-timeline driver creation failed "
-                    f"for instrument alias `{alias}`."
-                ) from exc
-            alias_to_driver[alias] = driver
-        capture_sampling_period_ns = self._resolve_capture_sampling_period_ns(
-            aliases_with_captures=aliases_with_captures,
-            alias_to_driver=alias_to_driver,
-            aliases=aliases,
-        )
+        with _timed_section(timer, f"{timing_prefix}.create_instrument_drivers"):
+            for alias in aliases:
+                instrument_info = alias_to_instrument_info[alias]
+                try:
+                    driver = quelware_api.fixed_timeline_driver_factory(
+                        session,
+                        instrument_info,
+                    )
+                except Exception as exc:
+                    raise RuntimeError(
+                        "QuEL-3 fixed-timeline driver creation failed "
+                        f"for instrument alias `{alias}`."
+                    ) from exc
+                alias_to_driver[alias] = driver
+        with _timed_section(timer, f"{timing_prefix}.resolve_capture_sampling_period"):
+            capture_sampling_period_ns = self._resolve_capture_sampling_period_ns(
+                aliases_with_captures=aliases_with_captures,
+                alias_to_driver=alias_to_driver,
+                aliases=aliases,
+            )
         return _PayloadExecutionSession(
             session=session,
             alias_to_resource_id=alias_to_resource_id,
@@ -460,103 +585,120 @@ class Quel3ExecutionManager:
         session_state: _PayloadExecutionSession,
         quelware_api: _QuelwareExecutionApi,
         parallel: bool,
+        timer: _Quel3BatchExecutionTimer | None = None,
+        timing_prefix: str = "execute_resolved_payload",
     ) -> Quel3BackendExecutionResult:
         """Execute one payload using an already-open payload session."""
         aliases = sorted(payload.fixed_timelines.keys())
         alias_bindings: dict[str, tuple[int, int]] = {}
         instrument_resource_ids: list[ResourceIdProtocol] = []
-        for alias in aliases:
-            driver = session_state.alias_to_driver[alias]
-            sampling_period_fs = driver.instrument_config.sampling_period_fs
-            timeline_step_samples = driver.instrument_config.timeline_step_samples
-            alias_bindings[alias] = (
-                sampling_period_fs,
-                timeline_step_samples,
-            )
-            instrument_resource_ids.append(session_state.alias_to_resource_id[alias])
+        with _timed_section(timer, f"{timing_prefix}.collect_alias_bindings"):
+            for alias in aliases:
+                driver = session_state.alias_to_driver[alias]
+                sampling_period_fs = driver.instrument_config.sampling_period_fs
+                timeline_step_samples = driver.instrument_config.timeline_step_samples
+                alias_bindings[alias] = (
+                    sampling_period_fs,
+                    timeline_step_samples,
+                )
+                instrument_resource_ids.append(
+                    session_state.alias_to_resource_id[alias]
+                )
 
-        sequencer = self._sequencer_builder.build(
-            payload=payload,
-            sequencer_factory=quelware_api.sequencer_factory,
-            default_sampling_period_ns=self._sampling_period_ns,
-            alias_bindings=alias_bindings,
-        )
+        with _timed_section(timer, f"{timing_prefix}.build_sequencer"):
+            sequencer = self._sequencer_builder.build(
+                payload=payload,
+                sequencer_factory=quelware_api.sequencer_factory,
+                default_sampling_period_ns=self._sampling_period_ns,
+                alias_bindings=alias_bindings,
+            )
 
         alias_to_directives: dict[str, list[DirectiveProtocol]] = {}
-        for alias in aliases:
-            directives: list[DirectiveProtocol] = []
-            frequency_hz = payload.fixed_timelines[alias].frequency_hz
-            if frequency_hz is not None:
-                directives.append(
-                    quelware_api.set_frequency_directive_factory(hz=frequency_hz)
+        with _timed_section(timer, f"{timing_prefix}.build_directives"):
+            for alias in aliases:
+                directives: list[DirectiveProtocol] = []
+                frequency_hz = payload.fixed_timelines[alias].frequency_hz
+                if frequency_hz is not None:
+                    directives.append(
+                        quelware_api.set_frequency_directive_factory(hz=frequency_hz)
+                    )
+                capture_mode_directive = quelware_api.build_capture_mode_directive(
+                    payload.capture_mode
                 )
-            capture_mode_directive = quelware_api.build_capture_mode_directive(
-                payload.capture_mode
-            )
-            if capture_mode_directive is not None:
-                directives.append(capture_mode_directive)
-            directives.append(sequencer.export_set_fixed_timeline_directive(alias))
-            alias_to_directives[alias] = directives
+                if capture_mode_directive is not None:
+                    directives.append(capture_mode_directive)
+                directives.append(sequencer.export_set_fixed_timeline_directive(alias))
+                alias_to_directives[alias] = directives
 
         drivers = tuple(session_state.alias_to_driver.values())
         if parallel:
-            await asyncio.gather(*(driver.initialize() for driver in drivers))
-            await asyncio.gather(
-                *(
-                    session_state.alias_to_driver[alias].apply(
+            with _timed_section(timer, f"{timing_prefix}.driver_initialize_parallel"):
+                await asyncio.gather(*(driver.initialize() for driver in drivers))
+            with _timed_section(timer, f"{timing_prefix}.driver_apply_parallel"):
+                await asyncio.gather(
+                    *(
+                        session_state.alias_to_driver[alias].apply(
+                            alias_to_directives[alias]
+                        )
+                        for alias in aliases
+                    )
+                )
+        else:
+            with _timed_section(timer, f"{timing_prefix}.driver_initialize_serial"):
+                for driver in drivers:
+                    await driver.initialize()
+            with _timed_section(timer, f"{timing_prefix}.driver_apply_serial"):
+                for alias in aliases:
+                    await session_state.alias_to_driver[alias].apply(
                         alias_to_directives[alias]
                     )
-                    for alias in aliases
-                )
-            )
-        else:
-            for driver in drivers:
-                await driver.initialize()
-            for alias in aliases:
-                await session_state.alias_to_driver[alias].apply(
-                    alias_to_directives[alias]
-                )
 
-        shot_samples = {
-            alias: {window.name: [] for window in timeline.capture_windows}
-            for alias, timeline in payload.fixed_timelines.items()
-        }
-        await session_state.session.trigger(instrument_ids=instrument_resource_ids)
+        with _timed_section(timer, f"{timing_prefix}.prepare_shot_samples"):
+            shot_samples = {
+                alias: {window.name: [] for window in timeline.capture_windows}
+                for alias, timeline in payload.fixed_timelines.items()
+            }
+        with _timed_section(timer, f"{timing_prefix}.session.trigger"):
+            await session_state.session.trigger(instrument_ids=instrument_resource_ids)
         if parallel:
-            results = await asyncio.gather(
-                *(
-                    session_state.alias_to_driver[alias].fetch_result()
-                    for alias in aliases
+            with _timed_section(timer, f"{timing_prefix}.fetch_results_parallel"):
+                results = await asyncio.gather(
+                    *(
+                        session_state.alias_to_driver[alias].fetch_result()
+                        for alias in aliases
+                    )
                 )
-            )
-            alias_results = dict(zip(aliases, results, strict=True))
+                alias_results = dict(zip(aliases, results, strict=True))
         else:
             alias_results: dict[str, ResultContainerProtocol] = {}
-            for alias in aliases:
-                alias_results[alias] = await session_state.alias_to_driver[
-                    alias
-                ].fetch_result()
+            with _timed_section(timer, f"{timing_prefix}.fetch_results_serial"):
+                for alias in aliases:
+                    alias_results[alias] = await session_state.alias_to_driver[
+                        alias
+                    ].fetch_result()
 
-        for alias, timeline in payload.fixed_timelines.items():
-            result = alias_results[alias]
-            for window in timeline.capture_windows:
-                window_key = window.name
-                capture_samples = self._extract_capture_samples(
-                    result,
-                    window_key,
-                    capture_mode=payload.capture_mode,
-                )
-                if capture_samples is None:
-                    continue
-                shot_samples[alias][window.name].append(capture_samples)
+        with _timed_section(timer, f"{timing_prefix}.extract_capture_samples"):
+            for alias, timeline in payload.fixed_timelines.items():
+                result = alias_results[alias]
+                for window in timeline.capture_windows:
+                    window_key = window.name
+                    capture_samples = self._extract_capture_samples(
+                        result,
+                        window_key,
+                        capture_mode=payload.capture_mode,
+                    )
+                    if capture_samples is None:
+                        continue
+                    shot_samples[alias][window.name].append(capture_samples)
 
-        return self._build_measurement_result(
-            payload=payload,
-            shot_samples=shot_samples,
-            capture_sampling_period_ns=session_state.capture_sampling_period_ns,
-            backend_sampling_period_ns=self._sampling_period_ns,
-            capture_decimation_factor=self._capture_decimation_factor,
-        )
+        with _timed_section(timer, f"{timing_prefix}.build_measurement_result"):
+            return self._build_measurement_result(
+                payload=payload,
+                shot_samples=shot_samples,
+                capture_sampling_period_ns=session_state.capture_sampling_period_ns,
+                backend_sampling_period_ns=self._sampling_period_ns,
+                capture_decimation_factor=self._capture_decimation_factor,
+            )
 
     @classmethod
     def _resolve_payload(
