@@ -2244,6 +2244,7 @@ class Experiment:
         readout_post_margin: float | None = None,
         plot: bool | None = None,
         enable_tqdm: bool | None = None,
+        use_batch_sweep: bool | None = None,
         title: str | None = None,
         xlabel: str | None = None,
         ylabel: str | None = None,
@@ -2284,6 +2285,9 @@ class Experiment:
             Whether to plot the measured signals. Defaults to True.
         enable_tqdm : bool, optional
             Whether to show a progress bar. Defaults to False.
+        use_batch_sweep : bool, optional
+            Whether to run sweep points through batch-capable measurement APIs.
+            Defaults to `False`, or to `system.yaml` `sweep.batch` for quel3.
         title : str, optional
             Title of the plot. Defaults to "Sweep result".
         xlabel : str, optional
@@ -2325,6 +2329,7 @@ class Experiment:
             readout_post_margin=readout_post_margin,
             plot=plot,
             enable_tqdm=enable_tqdm,
+            use_batch_sweep=use_batch_sweep,
             title=title,
             xlabel=xlabel,
             ylabel=ylabel,

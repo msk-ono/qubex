@@ -414,6 +414,19 @@ class ConfigLoader:
         return dict(value)
 
     @property
+    def sweep_config(self) -> dict[str, Any]:
+        """Return sweep execution configuration for the loaded system."""
+        self._ensure_loaded()
+        value = self._system_dict.get("sweep")
+        if value is None:
+            return {}
+        if not isinstance(value, dict):
+            raise TypeError(
+                f"`sweep` section in `{self._system_file}` must be a mapping."
+            )
+        return dict(value)
+
+    @property
     def measurement_defaults(self) -> MeasurementDefaults:
         """Return parsed partial measurement defaults for the loaded system."""
         self._ensure_loaded()

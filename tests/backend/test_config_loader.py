@@ -1289,6 +1289,45 @@ def test_backend_runtime_config_returns_selected_backend_section(
     assert loader.backend_runtime_config == runtime_config
 
 
+def test_sweep_config_returns_top_level_sweep_section(
+    tmp_path: Path,
+) -> None:
+    """Given sweep settings, when loading, then ConfigLoader exposes that section."""
+    config_dir, params_dir, chip_id = _make_minimal_files(tmp_path)
+    sweep_config = {"batch": True}
+
+    _write_yaml(
+        config_dir / "box.yaml",
+        {
+            "BOX1": {
+                "name": "Box One",
+                "type": "quel3",
+            }
+        },
+    )
+    _write_yaml(
+        config_dir / "system.yaml",
+        {
+            "schema_version": 1,
+            "chip_id": chip_id,
+            "backend": BACKEND_KIND_QUEL3,
+            "sweep": sweep_config,
+        },
+    )
+
+    loader = ConfigLoader(
+        system_id=chip_id,
+        config_dir=config_dir,
+        params_dir=params_dir,
+    )
+    loaded_config = loader.sweep_config
+    loaded_config["batch"] = False
+
+    assert loaded_config != loader.sweep_config
+    assert loader.sweep_config == sweep_config
+    assert loader.backend_runtime_config == {}
+
+
 def test_load_configures_quel3_readout_without_lo(tmp_path: Path) -> None:
     """Given quel3 backend, when loading, then readout ports are configured without LO."""
     config_dir, params_dir, chip_id = _make_minimal_files(tmp_path)
