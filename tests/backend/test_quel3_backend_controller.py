@@ -781,7 +781,7 @@ def test_execute_resolves_unit_prefixed_alias_binding(
 def test_execute_prepares_alias_session_before_resolving_payload(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Given a payload, execute should resolve aliases before payload rewrite."""
+    """Given a payload, execute should use resolved aliases for session setup."""
     events: list[str] = []
 
     class _OrderProbeManager(Quel3ExecutionManager):
@@ -857,11 +857,12 @@ def test_execute_prepares_alias_session_before_resolving_payload(
     asyncio.run(manager.execute_async(request=BackendExecutionRequest(payload=payload)))
 
     assert events[:4] == [
+        "resolve-payload",
         "resolve-info",
         "open-session",
         "build-driver",
-        "resolve-payload",
     ]
+    assert events.count("resolve-payload") == 1
 
 
 @dataclass(frozen=True)
