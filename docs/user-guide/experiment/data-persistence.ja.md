@@ -152,7 +152,9 @@ timestamp 付きの自動 raw-data file ではなく、自分で filename を決
 論理構造は次の通りです。
 
 - `MeasurementResult.data`: target label を key にした
-  `dict[str, list[CaptureData]]`
+  `dict[str, list[CaptureData]]`。target ごとの list は、user-visible
+  capture window の実行順です。backend 内部の workaround capture は
+  含まれません。
 - `MeasurementResult.measurement_config`: shot 数、shot interval、averaging
   mode、integration mode、classification mode、要求した return item
 - `MeasurementResult.device_config`: 任意の device / backend snapshot

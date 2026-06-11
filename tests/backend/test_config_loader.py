@@ -1328,6 +1328,39 @@ def test_sweep_config_returns_top_level_sweep_section(
     assert loader.backend_runtime_config == {}
 
 
+def test_pack_schedules_into_single_timeline_returns_top_level_measurement_flag(
+    tmp_path: Path,
+) -> None:
+    """Given measurement scheduling flag, when loading, then ConfigLoader exposes it."""
+    config_dir, params_dir, chip_id = _make_minimal_files(tmp_path)
+
+    _write_yaml(
+        config_dir / "box.yaml",
+        {
+            "BOX1": {
+                "name": "Box One",
+                "type": "quel3",
+            }
+        },
+    )
+    _write_yaml(
+        config_dir / "system.yaml",
+        {
+            "schema_version": 1,
+            "chip_id": chip_id,
+            "backend": BACKEND_KIND_QUEL3,
+            "measurement": {"pack_schedules_into_single_timeline": True},
+        },
+    )
+
+    loader = ConfigLoader(
+        system_id=chip_id,
+        config_dir=config_dir,
+        params_dir=params_dir,
+    )
+    assert loader.pack_schedules_into_single_timeline is True
+
+
 def test_load_configures_quel3_readout_without_lo(tmp_path: Path) -> None:
     """Given quel3 backend, when loading, then readout ports are configured without LO."""
     config_dir, params_dir, chip_id = _make_minimal_files(tmp_path)

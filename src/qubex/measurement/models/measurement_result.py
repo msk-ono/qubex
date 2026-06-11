@@ -18,7 +18,15 @@ from .measurement_config import MeasurementConfig
 
 
 class MeasurementResult(DataModel):
-    """Canonical serializable result of a measurement run."""
+    """
+    Canonical serializable result of a measurement run.
+
+    Notes
+    -----
+    For each target key, `data[target]` follows the user-visible capture-window
+    execution order for that target. Backend adapters must remove
+    backend-internal workaround captures before building this model.
+    """
 
     data: dict[str, list[CaptureData]]
     measurement_config: MeasurementConfig

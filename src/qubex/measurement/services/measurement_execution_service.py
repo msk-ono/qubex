@@ -8,11 +8,11 @@ from collections.abc import Awaitable, Callable, Collection, Iterator, Mapping, 
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Literal, TypeVar, cast
+from typing import Any, Literal, TypeAlias, TypeVar, cast
 
 import numpy as np
 from numpy.typing import ArrayLike
-from qxpulse import PulseSchedule, RampType
+from qxpulse import Blank, PulseSchedule, RampType
 
 from qubex.backend import (
     BackendController,
@@ -29,6 +29,7 @@ from qubex.measurement.measurement_constraint_profile import (
     MeasurementConstraintProfile,
 )
 from qubex.measurement.measurement_context import MeasurementContext
+from qubex.measurement.measurement_output import resolve_measurement_output_label
 from qubex.measurement.measurement_pulse_factory import MeasurementPulseFactory
 from qubex.measurement.measurement_result_converter import MeasurementResultConverter
 from qubex.measurement.measurement_schedule_builder import (
@@ -36,6 +37,8 @@ from qubex.measurement.measurement_schedule_builder import (
     MeasurementScheduleBuilder,
 )
 from qubex.measurement.measurement_schedule_runner import MeasurementScheduleRunner
+from qubex.measurement.models.capture_data import CaptureData
+from qubex.measurement.models.capture_schedule import Capture, CaptureSchedule
 from qubex.measurement.models.measure_result import (
     MeasureResult,
     MultipleMeasureResult,
@@ -71,6 +74,7 @@ logger = logging.getLogger(__name__)
 T = TypeVar("T")
 OptionT = TypeVar("OptionT")
 RFSwitchState = Literal["pass", "block", "open", "loop"]
+MeasurementResultSplitPlan: TypeAlias = list[dict[str, int]]
 
 
 def _run_async(
@@ -662,7 +666,7 @@ class MeasurementExecutionService:
             measurement_schedules = [
                 schedule(sweep_value) for sweep_value in normalized_values
             ]
-            results = await self.measurement_schedule_runner.execute_many_async(
+            results = await self._execute_measurement_schedules(
                 schedules=measurement_schedules,
                 config=resolved_config,
             )
@@ -754,7 +758,7 @@ class MeasurementExecutionService:
                 for ndindex in np.ndindex(shape)
             ]
             measurement_schedules = [schedule(point) for point in points]
-            results = await self.measurement_schedule_runner.execute_many_async(
+            results = await self._execute_measurement_schedules(
                 schedules=measurement_schedules,
                 config=resolved_config,
             )
@@ -779,6 +783,320 @@ class MeasurementExecutionService:
             config=resolved_config,
             results=results,
         )
+
+    async def _execute_measurement_schedules(
+        self,
+        *,
+        schedules: list[MeasurementSchedule],
+        config: MeasurementConfig,
+    ) -> list[MeasurementResult]:
+        """Execute multiple schedules either as one packed timeline or batch requests."""
+        runner = self.measurement_schedule_runner
+        if self._should_pack_measurement_schedules(
+            runner=runner,
+            schedules=schedules,
+            config=config,
+        ):
+            return await self._execute_measurement_schedules_as_packed_timeline(
+                runner=runner,
+                schedules=schedules,
+                config=config,
+            )
+        return await runner.execute_many_async(
+            schedules=schedules,
+            config=config,
+        )
+
+    async def _execute_measurement_schedules_as_packed_timeline(
+        self,
+        *,
+        runner: MeasurementScheduleRunner,
+        schedules: list[MeasurementSchedule],
+        config: MeasurementConfig,
+    ) -> list[MeasurementResult]:
+        """Execute a single packed timeline and split merged results per schedule."""
+        split_plan = self._build_measurement_result_split_plan(schedules=schedules)
+        merged_schedule = self._merge_measurement_schedules(
+            schedules=schedules,
+            shot_interval=config.shot_interval,
+        )
+
+        merged_request = runner._prepare_execution(  # noqa: SLF001
+            schedule=merged_schedule,
+            config=config,
+        )
+        merged_backend_result = await runner._execute_request(request=merged_request)  # noqa: SLF001
+        merged_measurement_result = runner._build_result(  # noqa: SLF001
+            backend_result=merged_backend_result,
+            config=config,
+        )
+        return self._split_merged_measurement_result(
+            merged_result=merged_measurement_result,
+            split_plan=split_plan,
+        )
+
+    def _should_pack_measurement_schedules(
+        self,
+        *,
+        runner: MeasurementScheduleRunner,
+        schedules: Sequence[MeasurementSchedule],
+        config: MeasurementConfig,
+    ) -> bool:
+        """Return whether all schedules should be packed into one timeline."""
+        del runner
+        if len(schedules) <= 1:
+            return False
+        if not config.should_pack_schedules_into_single_timeline:
+            return False
+        return self._can_merge_measurement_schedules(schedules=schedules)
+
+    def _can_merge_measurement_schedules(
+        self,
+        *,
+        schedules: Sequence[MeasurementSchedule],
+    ) -> bool:
+        """Return whether schedule metadata can be represented after concatenation."""
+        frequencies_by_label: dict[str, float | None] = {}
+        for schedule in schedules:
+            pulse_schedule = schedule.pulse_schedule
+            if not isinstance(pulse_schedule, PulseSchedule):
+                return False
+            get_frequencies = getattr(pulse_schedule, "get_frequencies", None)
+            if not callable(get_frequencies):
+                continue
+            raw_frequencies = get_frequencies()
+            if not isinstance(raw_frequencies, Mapping):
+                return False
+            for label, frequency in raw_frequencies.items():
+                if not isinstance(label, str):
+                    return False
+                if frequency is not None and not isinstance(frequency, (int, float)):
+                    return False
+                normalized_frequency = (
+                    float(frequency) if frequency is not None else None
+                )
+                if label not in frequencies_by_label:
+                    frequencies_by_label[label] = normalized_frequency
+                    continue
+                if not self._same_optional_frequency(
+                    frequencies_by_label[label],
+                    normalized_frequency,
+                ):
+                    return False
+        return True
+
+    @staticmethod
+    def _same_optional_frequency(
+        left: float | None,
+        right: float | None,
+    ) -> bool:
+        """Return whether two optional schedule frequencies are equivalent."""
+        if left is None or right is None:
+            return left is right
+        return bool(np.isclose(left, right))
+
+    def _build_measurement_result_split_plan(
+        self,
+        *,
+        schedules: list[MeasurementSchedule],
+    ) -> MeasurementResultSplitPlan:
+        """Build per-schedule visible capture counts keyed by canonical output target."""
+        split_plan: MeasurementResultSplitPlan = []
+        for schedule in schedules:
+            capture_counts: dict[str, int] = {}
+            for capture in schedule.capture_schedule.captures:
+                if capture.is_workaround:
+                    continue
+                for channel in capture.channels:
+                    output_target = self._resolve_capture_output_target(channel)
+                    capture_counts[output_target] = (
+                        capture_counts.get(output_target, 0) + 1
+                    )
+            split_plan.append(capture_counts)
+        return split_plan
+
+    def _resolve_capture_output_target(self, capture_channel: str) -> str:
+        """Resolve the canonical measurement-result key for one capture channel."""
+        return resolve_measurement_output_label(
+            experiment_system=getattr(
+                getattr(self, "_context", None),
+                "experiment_system",
+                None,
+            ),
+            target_label=capture_channel,
+        )
+
+    def _merge_measurement_schedules(
+        self,
+        *,
+        schedules: list[MeasurementSchedule],
+        shot_interval: float,
+    ) -> MeasurementSchedule:
+        """Build one measurement schedule by concatenating schedules separated by shot interval."""
+        if len(schedules) == 0:
+            raise ValueError("At least one schedule is required.")
+
+        first_schedule = schedules[0]
+        if not isinstance(first_schedule.pulse_schedule, PulseSchedule):
+            raise TypeError(
+                "measurement schedule must contain PulseSchedule for merging."
+            )
+        merged_pulse_schedule = first_schedule.pulse_schedule.copy()
+        merged_captures = [
+            Capture(
+                channels=[*capture.channels],
+                start_time=capture.start_time,
+                duration=capture.duration,
+                is_workaround=capture.is_workaround,
+            )
+            for capture in first_schedule.capture_schedule.captures
+        ]
+
+        for schedule in schedules[1:]:
+            if not isinstance(schedule.pulse_schedule, PulseSchedule):
+                raise TypeError(
+                    "measurement schedule must contain PulseSchedule for merging."
+                )
+            shift_duration = merged_pulse_schedule.duration + shot_interval
+            merged_pulse_schedule.barrier()
+            merged_pulse_schedule.pad(shift_duration)
+            self._prepare_new_channels_for_schedule_append(
+                merged_pulse_schedule=merged_pulse_schedule,
+                appended_pulse_schedule=schedule.pulse_schedule,
+                shift_duration=shift_duration,
+            )
+            merged_pulse_schedule.call(schedule.pulse_schedule, copy=True)
+            merged_pulse_schedule.barrier()
+            merged_captures.extend(
+                [
+                    Capture(
+                        channels=[*capture.channels],
+                        start_time=capture.start_time + shift_duration,
+                        duration=capture.duration,
+                        is_workaround=capture.is_workaround,
+                    )
+                    for capture in schedule.capture_schedule.captures
+                ]
+            )
+
+        return MeasurementSchedule(
+            pulse_schedule=merged_pulse_schedule,
+            capture_schedule=CaptureSchedule(captures=merged_captures),
+        )
+
+    def _prepare_new_channels_for_schedule_append(
+        self,
+        *,
+        merged_pulse_schedule: PulseSchedule,
+        appended_pulse_schedule: PulseSchedule,
+        shift_duration: float,
+    ) -> None:
+        """Pad channels that appear only in the appended schedule up to the append offset."""
+        merged_labels = set(merged_pulse_schedule.labels)
+        for label in appended_pulse_schedule.labels:
+            if label in merged_labels:
+                continue
+            sampling_period = self._resolve_channel_sampling_period(
+                pulse_schedule=appended_pulse_schedule,
+                label=label,
+            )
+            if sampling_period is None:
+                merged_pulse_schedule.add(label, Blank(duration=shift_duration))
+            else:
+                merged_pulse_schedule.add(
+                    label,
+                    Blank(
+                        duration=shift_duration,
+                        sampling_period=sampling_period,
+                    ),
+                )
+            self._copy_channel_frequency(
+                source=appended_pulse_schedule,
+                destination=merged_pulse_schedule,
+                label=label,
+            )
+
+    @staticmethod
+    def _resolve_channel_sampling_period(
+        *,
+        pulse_schedule: PulseSchedule,
+        label: str,
+    ) -> float | None:
+        """Return the sampling period for one channel sequence when available."""
+        try:
+            sequence = pulse_schedule.get_sequence(label, copy=False)
+        except KeyError:
+            return None
+        sampling_period = getattr(sequence, "sampling_period", None)
+        if isinstance(sampling_period, (int, float)):
+            return float(sampling_period)
+        return None
+
+    @staticmethod
+    def _copy_channel_frequency(
+        *,
+        source: PulseSchedule,
+        destination: PulseSchedule,
+        label: str,
+    ) -> None:
+        """Copy frequency metadata for a newly created channel when available."""
+        try:
+            frequency = source.get_frequency(label)
+        except KeyError:
+            return
+        destination.set_frequency(label, frequency)
+
+    def _split_merged_measurement_result(
+        self,
+        *,
+        merged_result: MeasurementResult,
+        split_plan: MeasurementResultSplitPlan,
+    ) -> list[MeasurementResult]:
+        """Split one merged measurement result by canonical capture ordering."""
+        remaining_data: dict[str, list[CaptureData]] = {
+            target: [*captures] for target, captures in merged_result.data.items()
+        }
+        split_results: list[MeasurementResult] = []
+
+        for capture_counts in split_plan:
+            chunk_data: dict[str, list[CaptureData]] = {}
+            for target, capture_count in capture_counts.items():
+                captures = remaining_data.setdefault(target, [])
+                if capture_count > len(captures):
+                    raise ValueError(
+                        f"Not enough captures for target `{target}` to split "
+                        "packed timeline: "
+                        f"expected {capture_count}, got {len(captures)}."
+                    )
+                chunk_data[target] = captures[:capture_count]
+                remaining_data[target] = captures[capture_count:]
+
+            classifier_refs = None
+            if merged_result.classifier_refs is not None:
+                classifier_refs = {
+                    target: classifier_ref
+                    for target, classifier_ref in merged_result.classifier_refs.items()
+                    if target in chunk_data
+                }
+                if len(classifier_refs) == 0:
+                    classifier_refs = None
+
+            split_results.append(
+                MeasurementResult(
+                    data=chunk_data,
+                    measurement_config=merged_result.measurement_config,
+                    device_config=merged_result.device_config,
+                    classifier_refs=classifier_refs,
+                )
+            )
+
+        for captures in remaining_data.values():
+            if len(captures) > 0:
+                raise ValueError(
+                    "Packed measurement result contains unmatched captures after split."
+                )
+
+        return split_results
 
     def _can_use_batch_execution(self) -> bool:
         """Return whether backend batch execution can be used safely."""
@@ -1328,6 +1646,9 @@ class MeasurementExecutionService:
             shot_averaging=shot_averaging,
             time_integration=time_integration,
             state_classification=state_classification,
+            pack_schedules_into_single_timeline=(
+                self.config_loader.pack_schedules_into_single_timeline
+            ),
         )
 
     def build_measurement_schedule(

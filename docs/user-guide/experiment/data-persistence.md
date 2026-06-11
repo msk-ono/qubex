@@ -155,7 +155,8 @@ instead of using timestamped automatic raw-data files.
 The logical structure is:
 
 - `MeasurementResult.data`: `dict[str, list[CaptureData]]`, keyed by target
-  label.
+  label. For each target, the list follows the user-visible capture-window
+  execution order; backend-internal workaround captures are omitted.
 - `MeasurementResult.measurement_config`: number of shots, shot interval,
   averaging mode, integration mode, classification mode, and requested return
   items.

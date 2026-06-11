@@ -34,7 +34,6 @@ from qubex.analysis.state_tomography import (
     mle_fit_density_matrix,
     plot_ghz_state_tomography,
 )
-from qubex.backend.backend_controller import BACKEND_KIND_QUEL3
 from qubex.compat.deprecated_options import (
     DeprecatedOptionSpec,
     normalize_deprecated_options,

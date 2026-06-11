@@ -1447,3 +1447,63 @@ def test_quel3_adapter_build_measurement_result_splits_shared_alias_targets() ->
 
     assert np.array_equal(result.data["Q00"][0].data, np.array([1.0 + 0.0j]))
     assert np.array_equal(result.data["Q01"][0].data, np.array([2.0 + 0.0j]))
+
+
+def test_quel3_adapter_build_measurement_result_preserves_repeated_capture_order() -> (
+    None
+):
+    """Given repeated target captures, conversion should preserve capture order."""
+    target = "RQ00"
+    alias = "alias-RQ00"
+    schedule = MeasurementSchedule.model_construct(
+        pulse_schedule=_FakePulseSchedule(
+            duration=1.2,
+            sequences={
+                target: _pulse_array(
+                    values=np.array([0.0 + 0.0j], dtype=np.complex128),
+                    sampling_period=0.4,
+                )
+            },
+        ),
+        capture_schedule=CaptureSchedule(
+            captures=[
+                Capture(
+                    channels=[target],
+                    start_time=0.2,
+                    duration=0.4,
+                ),
+                Capture(
+                    channels=[target],
+                    start_time=0.8,
+                    duration=0.4,
+                ),
+            ]
+        ),
+    )
+    adapter = Quel3MeasurementBackendAdapter(
+        backend_controller=_make_backend_controller(),
+        experiment_system=cast(Any, _FakeExperimentSystem()),
+        constraint_profile=MeasurementConstraintProfile.quel3(0.4),
+        instrument_alias_map=_alias_map({target: alias}),
+    )
+    _ = adapter.build_execution_request(schedule=schedule, config=_make_config())
+    backend_result = Quel3BackendExecutionResult(
+        status={},
+        data={
+            _runtime_alias(alias): [
+                np.array([1.0 + 0.0j], dtype=np.complex128),
+                np.array([2.0 + 0.0j], dtype=np.complex128),
+            ]
+        },
+        config={},
+    )
+
+    result = adapter.build_measurement_result(
+        backend_result=backend_result,
+        measurement_config=_make_config(),
+        device_config={},
+        sampling_period=0.4,
+    )
+
+    assert np.array_equal(result.data["Q00"][0].data, np.array([1.0 + 0.0j]))
+    assert np.array_equal(result.data["Q00"][1].data, np.array([2.0 + 0.0j]))

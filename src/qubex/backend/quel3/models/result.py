@@ -12,7 +12,13 @@ Quel3BackendResultConfig: TypeAlias = dict[str, float]
 
 @dataclass
 class Quel3BackendExecutionResult:
-    """Backend-level measurement result returned by QuEL-3 execution."""
+    """
+    Backend-level measurement result returned by QuEL-3 execution.
+
+    Notes
+    -----
+    Each `data[alias]` list preserves the alias capture-window execution order.
+    """
 
     status: dict[str, object]
     data: dict[str, list[np.ndarray]]

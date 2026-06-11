@@ -18,6 +18,7 @@ from qubex.backend.quel1 import (
 from qubex.measurement.measurement_constraint_profile import (
     MeasurementConstraintProfile,
 )
+from qubex.measurement.measurement_output import resolve_measurement_output_label
 from qubex.measurement.models.capture_data import CaptureData
 from qubex.measurement.models.measure_result import MeasureMode
 from qubex.measurement.models.measurement_config import MeasurementConfig
@@ -299,8 +300,6 @@ class Quel1MeasurementBackendAdapter:
         shot_averaging = measurement_config.shot_averaging
         skip_extra_capture = self._constraint_profile.require_workaround_capture
         norm_factor = 2 ** (-32)  # normalization factor for 32-bit data
-        target_registry = getattr(self._experiment_system, "target_registry", None)
-
         iq_data: dict[str, list[npt.ArrayLike]] = {}
         for target, iqs in sorted(backend_result.data.items()):
             sideband = "U"
@@ -318,15 +317,10 @@ class Quel1MeasurementBackendAdapter:
         measure_data: dict[str, list[CaptureData]] = {}
         if not shot_averaging:
             for target, iqs in iq_data.items():
-                if target_registry is not None and hasattr(
-                    target_registry,
-                    "measurement_output_label",
-                ):
-                    qubit = str(target_registry.measurement_output_label(target))
-                elif target.startswith("R"):
-                    qubit = target[1:]
-                else:
-                    qubit = target
+                qubit = resolve_measurement_output_label(
+                    experiment_system=self._experiment_system,
+                    target_label=target,
+                )
                 values: list[CaptureData] = []
                 for index, iq in enumerate(iqs):
                     if skip_extra_capture and index == 0:
@@ -345,15 +339,10 @@ class Quel1MeasurementBackendAdapter:
                 measure_data[qubit] = values
         else:
             for target, iqs in iq_data.items():
-                if target_registry is not None and hasattr(
-                    target_registry,
-                    "measurement_output_label",
-                ):
-                    qubit = str(target_registry.measurement_output_label(target))
-                elif target.startswith("R"):
-                    qubit = target[1:]
-                else:
-                    qubit = target
+                qubit = resolve_measurement_output_label(
+                    experiment_system=self._experiment_system,
+                    target_label=target,
+                )
                 values: list[CaptureData] = []
                 for index, iq in enumerate(iqs):
                     if skip_extra_capture and index == 0:
