@@ -777,6 +777,93 @@ def test_execute_resolves_unit_prefixed_alias_binding(
     assert session.trigger_calls == [["inst-q00"]]
     assert "quel3-02-a01:Q00" in result.data
 
+
+def test_execute_prepares_alias_session_before_resolving_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Given a payload, execute should resolve aliases before payload rewrite."""
+    events: list[str] = []
+
+    class _OrderProbeManager(Quel3ExecutionManager):
+        @classmethod
+        def _resolve_payload(
+            cls,
+            *,
+            payload: Quel3ExecutionPayload,
+        ) -> Quel3ExecutionPayload:
+            events.append("resolve-payload")
+            return super()._resolve_payload(payload=payload)
+
+    payload = _make_payload()
+    payload = replace(
+        payload,
+        fixed_timelines={"Q00": payload.fixed_timelines["alias-rq00"]},
+        instrument_bindings={"Q00": "alias:quel3-02-a01:Q00"},
+    )
+    manager = _OrderProbeManager(
+        runtime_config=Quel3RuntimeConfig(),
+        sampling_period_ns=0.4,
+        capture_decimation_factor=4,
+    )
+
+    class _UnitAwareResolver:
+        async def refresh(self, client: object) -> None:
+            del client
+
+        def resolve(self, aliases: list[str]) -> list[str]:
+            return aliases
+
+        def find_inst_info_by_alias(
+            self,
+            alias: str,
+            *,
+            unit: str | None = None,
+        ) -> _FakeInstrumentInfo:
+            events.append("resolve-info")
+            if (alias, unit) != ("Q00", "quel3-02-a01"):
+                raise ValueError(alias)
+            return _FakeInstrumentInfo(
+                id="inst-q00",
+                port_id="quel3-02-a01:tx_p04",
+                definition=_FakeInstrumentDefinition(
+                    alias="Q00",
+                    role="TRANSMITTER",
+                ),
+            )
+
+    class _OrderProbeClient(_FakeClient):
+        def create_session(self, resource_ids: list[str]) -> _FakeSession:
+            events.append("open-session")
+            return super().create_session(resource_ids)
+
+    def _create_driver(
+        session: object,
+        instrument_info: object,
+    ) -> _FakeInstrumentDriver:
+        del session, instrument_info
+        events.append("build-driver")
+        return _FakeInstrumentDriver()
+
+    monkeypatch.setattr(
+        manager,
+        "_load_quelware_api",
+        lambda: _make_fake_execution_api(
+            client_factory=lambda endpoint, port: _OrderProbeClient(_FakeSession()),
+            instrument_resolver_factory=_UnitAwareResolver,
+            fixed_timeline_driver_factory=_create_driver,
+        ),
+    )
+
+    asyncio.run(manager.execute_async(request=BackendExecutionRequest(payload=payload)))
+
+    assert events[:4] == [
+        "resolve-info",
+        "open-session",
+        "build-driver",
+        "resolve-payload",
+    ]
+
+
 @dataclass(frozen=True)
 class _FakeInstrumentConfig:
     sampling_period_fs: int

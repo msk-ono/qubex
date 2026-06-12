@@ -6,7 +6,7 @@ import asyncio
 import importlib
 import logging
 from collections import defaultdict
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Collection, Sequence
 from dataclasses import dataclass, replace
 from typing import TypeGuard, TypeVar, cast
 
@@ -78,6 +78,14 @@ class _PayloadExecutionSession:
     alias_to_resource_id: dict[str, ResourceIdProtocol]
     alias_to_driver: dict[str, InstrumentDriverProtocol]
     capture_sampling_period_ns: float | None
+
+
+@dataclass(frozen=True)
+class _PayloadAliasPlan:
+    """Runtime aliases required to execute one payload."""
+
+    aliases: tuple[str, ...]
+    aliases_with_captures: frozenset[str]
 
 
 @dataclass(frozen=True)
@@ -351,15 +359,19 @@ class Quel3ExecutionManager:
         )
         results = []
         for payload in payloads:
-            resolved_payload = self._resolve_execution_payload(
-                payload=payload,
+            runnable_payload = self._filter_runnable_payload(payload)
+            alias_plan = self._plan_payload_aliases(payload=runnable_payload)
+            alias_to_instrument_info = self._resolve_alias_to_instrument_info_map(
                 resolver=resolver,
+                aliases=alias_plan.aliases,
             )
             session_state = await self._open_payload_execution_session(
-                resolver=resolver,
-                resolved_payload=resolved_payload,
+                alias_to_instrument_info=alias_to_instrument_info,
+                aliases=alias_plan.aliases,
+                aliases_with_captures=alias_plan.aliases_with_captures,
                 quelware_api=quelware_api,
             )
+            resolved_payload = self._resolve_payload(payload=runnable_payload)
             results.append(
                 await self._execute_resolved_payload(
                     payload=resolved_payload,
@@ -370,32 +382,16 @@ class Quel3ExecutionManager:
             )
         return results
 
-    def _resolve_execution_payload(
-        self,
-        *,
-        payload: Quel3ExecutionPayload,
-        resolver: InstrumentResolverProtocol,
-    ) -> Quel3ExecutionPayload:
-        """Resolve one payload to concrete runnable aliases."""
-        del resolver
-        resolved_payload = self._resolve_payload(payload=payload)
-        return self._filter_runnable_payload(resolved_payload)
-
     async def _open_payload_execution_session(
         self,
         *,
-        resolver: InstrumentResolverProtocol,
-        resolved_payload: Quel3ExecutionPayload,
+        alias_to_instrument_info: dict[str, InstrumentInfoProtocol],
+        aliases: Sequence[str],
+        aliases_with_captures: Collection[str],
         quelware_api: _QuelwareExecutionApi,
     ) -> _PayloadExecutionSession:
         """Open a payload session and rebuild session-bound drivers."""
-        aliases = tuple(sorted(resolved_payload.fixed_timelines))
-        alias_to_instrument_info = self._resolve_alias_to_instrument_info_map(
-            resolver=resolver,
-            aliases=aliases,
-        )
         alias_to_resource_id = self._resolve_alias_to_resource_id_map(
-            resolver=resolver,
             alias_to_instrument_info=alias_to_instrument_info,
             aliases=aliases,
         )
@@ -428,7 +424,7 @@ class Quel3ExecutionManager:
             quelware_api=quelware_api,
         )
         capture_sampling_period_ns = self._resolve_capture_sampling_period_ns(
-            payload=resolved_payload,
+            aliases_with_captures=aliases_with_captures,
             alias_to_driver=alias_to_driver,
             aliases=aliases,
         )
@@ -453,17 +449,17 @@ class Quel3ExecutionManager:
     @staticmethod
     def _resolve_capture_sampling_period_ns(
         *,
-        payload: Quel3ExecutionPayload,
+        aliases_with_captures: Collection[str],
         alias_to_driver: dict[str, InstrumentDriverProtocol],
         aliases: Sequence[str],
     ) -> float | None:
         """Resolve the capture sampling period for one resolved payload."""
         capture_sampling_period_ns: float | None = None
         for alias in aliases:
+            if alias not in aliases_with_captures:
+                continue
             driver = alias_to_driver[alias]
             sampling_period_fs = driver.instrument_config.sampling_period_fs
-            if len(payload.fixed_timelines[alias].capture_windows) == 0:
-                continue
             alias_sampling_period_ns = sampling_period_fs / 1e6
             if capture_sampling_period_ns is None:
                 capture_sampling_period_ns = alias_sampling_period_ns
@@ -682,7 +678,6 @@ class Quel3ExecutionManager:
     @staticmethod
     def _resolve_alias_to_resource_id_map(
         *,
-        resolver: InstrumentResolverProtocol,
         alias_to_instrument_info: dict[str, InstrumentInfoProtocol],
         aliases: Sequence[str],
     ) -> dict[str, ResourceIdProtocol]:
@@ -695,6 +690,37 @@ class Quel3ExecutionManager:
                 alias_to_resource_id[alias] = resource_id
 
         return alias_to_resource_id
+
+    @classmethod
+    def _plan_payload_aliases(
+        cls,
+        *,
+        payload: Quel3ExecutionPayload,
+    ) -> _PayloadAliasPlan:
+        """Return runtime aliases and capture-bearing aliases for one payload."""
+        bindings = payload.instrument_bindings
+        aliases: set[str] = set()
+        aliases_with_captures: set[str] = set()
+
+        for target, timeline in payload.fixed_timelines.items():
+            binding = bindings.get(target)
+            if binding is None and len(bindings) > 0:
+                raise ValueError(
+                    f"Instrument binding is not configured for target `{target}`."
+                )
+            alias = (
+                target
+                if binding is None
+                else cls._resolve_alias_from_binding(binding=binding)
+            )
+            aliases.add(alias)
+            if len(timeline.capture_windows) > 0:
+                aliases_with_captures.add(alias)
+
+        return _PayloadAliasPlan(
+            aliases=tuple(sorted(aliases)),
+            aliases_with_captures=frozenset(aliases_with_captures),
+        )
 
     @classmethod
     def _resolve_payload(
