@@ -23,7 +23,7 @@ class CaptureSchedule(Model):
 
     @cached_property
     def channels(self) -> dict[str, list[Capture]]:
-        """Return captures grouped by channel."""
+        """Return captures grouped by channel preserving capture-list order."""
         schedule: dict[str, list[Capture]] = {}
         for capture in self.captures:
             for channel in capture.channels:

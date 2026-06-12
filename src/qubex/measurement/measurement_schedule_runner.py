@@ -3,29 +3,28 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Mapping
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 from qubex.backend import (
     BackendController,
     BackendExecutionRequest,
 )
-from qubex.backend.quel1 import (
-    ExecutionMode,
-    Quel1BackendController,
-)
+from qubex.backend.quel1 import Quel1BackendController
 from qubex.backend.quel3 import Quel3BackendController
 from qubex.system import ExperimentSystem
 
-from .adapters import (
-    MeasurementBackendAdapter,
-    Quel1MeasurementBackendAdapter,
-    Quel3MeasurementBackendAdapter,
-)
+from . import adapters as _measurement_adapters
+from .adapters import MeasurementBackendAdapter
 from .measurement_constraint_profile import MeasurementConstraintProfile
 from .models.measurement_config import MeasurementConfig
 from .models.measurement_result import MeasurementResult
 from .models.measurement_schedule import MeasurementSchedule
 from .models.quel1_measurement_options import Quel1MeasurementOptions
+
+Quel1MeasurementBackendAdapter = _measurement_adapters.Quel1MeasurementBackendAdapter
+Quel3MeasurementBackendAdapter = _measurement_adapters.Quel3MeasurementBackendAdapter
+
+ExecutionMode = Literal["serial", "parallel"]
 
 
 class MeasurementScheduleRunner:
@@ -172,19 +171,24 @@ class MeasurementScheduleRunner:
             config=config,
             quel1_options=quel1_options,
         )
-        if self._execution_mode is None and self._clock_health_checks is None:
-            backend_result = await self._backend_controller.execute_async(
-                request=request
-            )
-        else:
-            backend_result = await self._backend_controller.execute_async(
-                request=request,
-                execution_mode=self._execution_mode,
-                clock_health_checks=self._clock_health_checks,
-            )
+        backend_result = await self._execute_request(request=request)
         return self._build_result(
             backend_result=backend_result,
             config=config,
+        )
+
+    async def _execute_request(
+        self,
+        *,
+        request: BackendExecutionRequest,
+    ) -> object:
+        """Execute one backend request with optional execution options."""
+        if self._execution_mode is None and self._clock_health_checks is None:
+            return await self._backend_controller.execute_async(request=request)
+        return await self._backend_controller.execute_async(
+            request=request,
+            execution_mode=self._execution_mode,
+            clock_health_checks=self._clock_health_checks,
         )
 
     async def execute_many_async(
@@ -214,6 +218,9 @@ class MeasurementScheduleRunner:
                 )
                 for backend_result in backend_results
             ]
+
+        if len(schedules) == 0:
+            return []
 
         return [
             await self.execute_async(

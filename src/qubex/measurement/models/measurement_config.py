@@ -28,6 +28,7 @@ class MeasurementConfig(Model):
     time_integration: bool
     state_classification: bool
     return_items: tuple[ReturnItem, ...] = ()
+    pack_schedules_into_single_timeline: bool = False
 
     @model_validator(mode="after")
     def _validate_invariants(self) -> MeasurementConfig:
@@ -62,6 +63,11 @@ class MeasurementConfig(Model):
                 f"return_items must include required entries for this mode: {joined}."
             )
         return self
+
+    @property
+    def should_pack_schedules_into_single_timeline(self) -> bool:
+        """Whether multiple schedules should be packed into one execution request."""
+        return self.pack_schedules_into_single_timeline
 
     @property
     def primary_return_item(self) -> ReturnItem:

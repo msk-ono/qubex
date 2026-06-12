@@ -26,6 +26,7 @@ from qubex.backend.quel3.quel3_backend_constants import READOUT_SAMPLING_PERIOD_
 from qubex.measurement.measurement_constraint_profile import (
     MeasurementConstraintProfile,
 )
+from qubex.measurement.measurement_output import resolve_measurement_output_label
 from qubex.measurement.models.capture_data import CaptureData
 from qubex.measurement.models.measurement_config import MeasurementConfig
 from qubex.measurement.models.measurement_result import MeasurementResult
@@ -115,7 +116,6 @@ class Quel3MeasurementBackendAdapter:
         fixed_timelines: dict[str, Quel3FixedTimeline] = {}
         output_target_labels_by_target: dict[str, str] = {}
         instrument_bindings: dict[str, str] = {}
-        target_registry = self._experiment_system.target_registry
         alias_map = self._instrument_alias_map
 
         for target in pulse_schedule.labels:
@@ -180,14 +180,10 @@ class Quel3MeasurementBackendAdapter:
                     pulse_schedule=pulse_schedule,
                 ),
             )
-            try:
-                output_target_labels_by_target[target] = str(
-                    self._experiment_system.resolve_qubit_label(target)
-                )
-            except ValueError:
-                output_target_labels_by_target[target] = str(
-                    target_registry.measurement_output_label(target)
-                )
+            output_target_labels_by_target[target] = resolve_measurement_output_label(
+                experiment_system=self._experiment_system,
+                target_label=target,
+            )
 
         self._output_target_labels_by_target = output_target_labels_by_target
         capture_mode = self._resolve_capture_mode(config)

@@ -94,6 +94,48 @@ def test_build_measurement_result_converts_single_mode_to_qubit_labels() -> None
     )
 
 
+def test_build_measurement_result_preserves_repeated_capture_order() -> None:
+    """Given repeated target captures, conversion should preserve capture order."""
+    norm_factor = 2 ** (-32)
+    backend_result = Quel1BackendExecutionResult(
+        status={},
+        data={
+            "RQ00": [
+                np.array([[1.0 + 0.0j]], dtype=np.complex128),
+                np.array([[2.0 + 0.0j]], dtype=np.complex128),
+            ]
+        },
+        config={},
+    )
+    adapter = Quel1MeasurementBackendAdapter(
+        backend_controller=cast(Any, object()),
+        experiment_system=cast(
+            Any,
+            _ExperimentSystemStub(sideband_by_target={"RQ00": "U"}),
+        ),
+        constraint_profile=replace(
+            MeasurementConstraintProfile.quel1(),
+            require_workaround_capture=False,
+        ),
+    )
+
+    result = adapter.build_measurement_result(
+        backend_result=backend_result,
+        measurement_config=_make_config(mode="single", shots=1),
+        device_config={"kind": "quel1"},
+        sampling_period=2.0,
+    )
+
+    assert_allclose(
+        result.data["Q00"][0].data,
+        np.array([[1.0 + 0.0j]], dtype=np.complex128) * norm_factor,
+    )
+    assert_allclose(
+        result.data["Q00"][1].data,
+        np.array([[2.0 + 0.0j]], dtype=np.complex128) * norm_factor,
+    )
+
+
 def test_build_measurement_result_converts_avg_mode_with_shot_scaling() -> None:
     """Given QuEL-1 raw result, when converting avg mode, then waveform is shot-normalized and squeezed."""
     norm_factor = 2 ** (-32)

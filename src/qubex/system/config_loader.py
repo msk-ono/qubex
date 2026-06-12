@@ -427,6 +427,25 @@ class ConfigLoader:
         return dict(value)
 
     @property
+    def pack_schedules_into_single_timeline(self) -> bool:
+        """Return whether multiple measurement schedules should be packed into one timeline."""
+        self._ensure_loaded()
+        measurement_config = self._system_dict.get("measurement", {})
+        if measurement_config is None:
+            return False
+        if not isinstance(measurement_config, dict):
+            raise TypeError(
+                f"`measurement` section in `{self._system_file}` must be a mapping."
+            )
+        value = measurement_config.get("pack_schedules_into_single_timeline", False)
+        if isinstance(value, bool):
+            return value
+        raise TypeError(
+            "`pack_schedules_into_single_timeline` in `measurement` section of "
+            f"`{self._system_file}` must be a boolean."
+        )
+
+    @property
     def measurement_defaults(self) -> MeasurementDefaults:
         """Return parsed partial measurement defaults for the loaded system."""
         self._ensure_loaded()

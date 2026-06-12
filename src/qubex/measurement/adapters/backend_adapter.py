@@ -39,7 +39,15 @@ class MeasurementBackendAdapter(Protocol):
         device_config: dict,
         sampling_period: float,
     ) -> MeasurementResult:
-        """Build canonical result from a backend-specific result payload."""
+        """
+        Build canonical result from a backend-specific result payload.
+
+        Notes
+        -----
+        For each target, returned captures must preserve the user-visible
+        capture-window execution order for that target. Backend adapters must
+        exclude backend-internal workaround captures from the canonical result.
+        """
         ...
 
 
