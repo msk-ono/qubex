@@ -94,12 +94,20 @@ class _FakeRunner:
         self, *, request: BackendExecutionRequest
     ) -> _BackendResult:
         self.executed_requests.append(request)
+        schedule = cast(MeasurementSchedule, request.payload)
+        visible_capture_count = sum(
+            0 if capture.is_workaround else len(capture.channels)
+            for capture in schedule.capture_schedule.captures
+        )
         return _BackendResult(
             status={},
             data={
                 "Q00": [
-                    np.array([[1.1 + 0.0j], [1.1 + 0.0j]], dtype=np.complex128),
-                    np.array([[2.2 + 0.0j], [2.2 + 0.0j]], dtype=np.complex128),
+                    np.array(
+                        [[float(index + 1) + 0.0j], [float(index + 1) + 0.0j]],
+                        dtype=np.complex128,
+                    )
+                    for index in range(visible_capture_count)
                 ],
             },
             config={"sampling_period_ns": 0.4},
@@ -150,7 +158,8 @@ def _make_context() -> tuple[SimpleNamespace, _FakeBackend]:
     backend = _FakeBackend()
     context = SimpleNamespace(
         config_loader=SimpleNamespace(
-            pack_schedules_into_single_timeline=False,
+            schedule_packing_enabled=False,
+            schedule_packing_max_repeated_timeline_duration_ns=None,
         ),
         experiment_system=SimpleNamespace(),
         system_manager=SimpleNamespace(),
@@ -188,7 +197,7 @@ def _make_service(
     return service, runners
 
 
-def test_run_sweep_measurement_with_pack_schedules_into_single_timeline_merges_and_splits(
+def test_run_sweep_measurement_with_schedule_packing_merges_and_splits(
     monkeypatch,
 ) -> None:
     """Given pack option, run_sweep_measurement should execute one merged timeline and split results."""
@@ -206,9 +215,7 @@ def test_run_sweep_measurement_with_pack_schedules_into_single_timeline_merges_a
     def _schedule_builder(value: object) -> MeasurementSchedule:
         return schedules[int(cast(float, value))]
 
-    config = _make_config().model_copy(
-        update={"pack_schedules_into_single_timeline": True}
-    )
+    config = _make_config().model_copy(update={"schedule_packing_enabled": True})
 
     result = asyncio.run(
         service.run_sweep_measurement(
@@ -233,13 +240,56 @@ def test_run_sweep_measurement_with_pack_schedules_into_single_timeline_merges_a
     assert list(result.results[0].data) == ["Q00"]
     assert list(result.results[1].data) == ["Q00"]
     assert np.asarray(result.results[0].data["Q00"][0].data).tolist() == [
-        [1.1 + 0.0j],
-        [1.1 + 0.0j],
+        [1.0 + 0.0j],
+        [1.0 + 0.0j],
     ]
     assert np.asarray(result.results[1].data["Q00"][0].data).tolist() == [
-        [2.2 + 0.0j],
-        [2.2 + 0.0j],
+        [2.0 + 0.0j],
+        [2.0 + 0.0j],
     ]
+
+
+def test_run_sweep_measurement_splits_packed_timelines_by_repeated_duration(
+    monkeypatch,
+) -> None:
+    """Given a packed timeline limit, run_sweep_measurement should split packed chunks."""
+    schedules = [
+        _make_schedule(label="Q00", capture_start=float(index), capture_target="Q00")
+        for index in range(4)
+    ]
+
+    backend = _FakeBackend()
+    service, runners = _make_service(monkeypatch=monkeypatch, backend=backend)
+
+    def _schedule_builder(value: object) -> MeasurementSchedule:
+        return schedules[int(cast(float, value))]
+
+    config = _make_config().model_copy(
+        update={
+            "shot_interval": 2.0,
+            "schedule_packing_enabled": True,
+            "max_repeated_timeline_duration_ns": 24,
+        }
+    )
+
+    result = asyncio.run(
+        service.run_sweep_measurement(
+            schedule=_schedule_builder,
+            sweep_values=[0, 1, 2, 3],
+            config=config,
+        )
+    )
+
+    runner = runners[0]
+    assert len(runner.prepare_calls) == 2
+    assert len(runner.executed_requests) == 2
+    assert [
+        len(schedule.capture_schedule.captures) for schedule in runner.prepare_calls
+    ] == [
+        2,
+        2,
+    ]
+    assert len(result.results) == 4
 
 
 def test_merge_measurement_schedules_rebuilds_capture_channels_after_source_cache() -> (
@@ -275,9 +325,7 @@ def test_should_pack_measurement_schedules_rejects_different_labels() -> None:
     second_schedule = _make_schedule(
         label="Q01", capture_start=2.0, capture_target="Q01"
     )
-    config = _make_config().model_copy(
-        update={"pack_schedules_into_single_timeline": True}
-    )
+    config = _make_config().model_copy(update={"schedule_packing_enabled": True})
 
     assert (
         service._should_pack_measurement_schedules(  # noqa: SLF001
@@ -304,9 +352,7 @@ def test_should_pack_measurement_schedules_rejects_different_sampling_periods() 
         )
     finally:
         set_sampling_period(original_sampling_period)
-    config = _make_config().model_copy(
-        update={"pack_schedules_into_single_timeline": True}
-    )
+    config = _make_config().model_copy(update={"schedule_packing_enabled": True})
 
     assert (
         service._should_pack_measurement_schedules(  # noqa: SLF001
@@ -425,9 +471,7 @@ def test_should_pack_measurement_schedules_rejects_conflicting_frequencies() -> 
     )
     first_schedule.pulse_schedule.set_frequency("Q00", 5.0)
     second_schedule.pulse_schedule.set_frequency("Q00", 5.1)
-    config = _make_config().model_copy(
-        update={"pack_schedules_into_single_timeline": True}
-    )
+    config = _make_config().model_copy(update={"schedule_packing_enabled": True})
 
     assert (
         service._should_pack_measurement_schedules(  # noqa: SLF001

@@ -427,22 +427,58 @@ class ConfigLoader:
         return dict(value)
 
     @property
-    def pack_schedules_into_single_timeline(self) -> bool:
-        """Return whether multiple measurement schedules should be packed into one timeline."""
+    def schedule_packing_enabled(self) -> bool:
+        """Return whether measurement schedules should be packed into timelines."""
+        config = self._schedule_packing_config()
+        value = config.get("enable", False)
+        if isinstance(value, bool):
+            return value
+        raise TypeError(
+            "`enable` in `measurement.schedule_packing` section of "
+            f"`{self._system_file}` must be a boolean."
+        )
+
+    @property
+    def schedule_packing_max_repeated_timeline_duration_ns(
+        self,
+    ) -> float | None:
+        """Return repeated packed-timeline duration limit in ns."""
+        config = self._schedule_packing_config()
+        value = config.get("max_repeated_timeline_duration_ns")
+        if value is None:
+            return None
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise TypeError(
+                "`max_repeated_timeline_duration_ns` in "
+                "`measurement.schedule_packing` section of "
+                f"`{self._system_file}` must be a number."
+            )
+        if value <= 0:
+            raise ValueError(
+                "`max_repeated_timeline_duration_ns` in "
+                "`measurement.schedule_packing` section of "
+                f"`{self._system_file}` must be positive."
+            )
+        return float(value)
+
+    def _schedule_packing_config(self) -> dict[str, Any]:
+        """Return schedule packing configuration mapping."""
         self._ensure_loaded()
         measurement_config = self._system_dict.get("measurement", {})
         if measurement_config is None:
-            return False
+            return {}
         if not isinstance(measurement_config, dict):
             raise TypeError(
                 f"`measurement` section in `{self._system_file}` must be a mapping."
             )
-        value = measurement_config.get("pack_schedules_into_single_timeline", False)
-        if isinstance(value, bool):
-            return value
+        value = measurement_config.get("schedule_packing", {})
+        if value is None:
+            return {}
+        if isinstance(value, dict):
+            return dict(value)
         raise TypeError(
-            "`pack_schedules_into_single_timeline` in `measurement` section of "
-            f"`{self._system_file}` must be a boolean."
+            "`schedule_packing` in `measurement` section of "
+            f"`{self._system_file}` must be a mapping."
         )
 
     @property

@@ -1328,10 +1328,10 @@ def test_sweep_config_returns_top_level_sweep_section(
     assert loader.backend_runtime_config == {}
 
 
-def test_pack_schedules_into_single_timeline_returns_top_level_measurement_flag(
+def test_schedule_packing_rejects_boolean_config(
     tmp_path: Path,
 ) -> None:
-    """Given measurement scheduling flag, when loading, then ConfigLoader exposes it."""
+    """Given boolean packing config, when loading, then ConfigLoader rejects it."""
     config_dir, params_dir, chip_id = _make_minimal_files(tmp_path)
 
     _write_yaml(
@@ -1349,7 +1349,7 @@ def test_pack_schedules_into_single_timeline_returns_top_level_measurement_flag(
             "schema_version": 1,
             "chip_id": chip_id,
             "backend": BACKEND_KIND_QUEL3,
-            "measurement": {"pack_schedules_into_single_timeline": True},
+            "measurement": {"schedule_packing": True},
         },
     )
 
@@ -1358,7 +1358,49 @@ def test_pack_schedules_into_single_timeline_returns_top_level_measurement_flag(
         config_dir=config_dir,
         params_dir=params_dir,
     )
-    assert loader.pack_schedules_into_single_timeline is True
+
+    with pytest.raises(TypeError):
+        _ = loader.schedule_packing_enabled
+
+
+def test_schedule_packing_returns_nested_measurement_config(
+    tmp_path: Path,
+) -> None:
+    """Given nested measurement packing config, when loading, then ConfigLoader exposes it."""
+    config_dir, params_dir, chip_id = _make_minimal_files(tmp_path)
+
+    _write_yaml(
+        config_dir / "box.yaml",
+        {
+            "BOX1": {
+                "name": "Box One",
+                "type": "quel3",
+            }
+        },
+    )
+    _write_yaml(
+        config_dir / "system.yaml",
+        {
+            "schema_version": 1,
+            "chip_id": chip_id,
+            "backend": BACKEND_KIND_QUEL3,
+            "measurement": {
+                "schedule_packing": {
+                    "enable": True,
+                    "max_repeated_timeline_duration_ns": 20_000_000_000,
+                }
+            },
+        },
+    )
+
+    loader = ConfigLoader(
+        system_id=chip_id,
+        config_dir=config_dir,
+        params_dir=params_dir,
+    )
+
+    assert loader.schedule_packing_enabled is True
+    assert loader.schedule_packing_max_repeated_timeline_duration_ns == 20_000_000_000
 
 
 def test_load_configures_quel3_readout_without_lo(tmp_path: Path) -> None:

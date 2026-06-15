@@ -814,7 +814,29 @@ class MeasurementExecutionService:
         schedules: list[MeasurementSchedule],
         config: MeasurementConfig,
     ) -> list[MeasurementResult]:
-        """Execute a single packed timeline and split merged results per schedule."""
+        """Execute packed timeline chunks and split merged results per schedule."""
+        results: list[MeasurementResult] = []
+        for chunk in self._split_measurement_schedules_into_packed_timeline_chunks(
+            schedules=schedules,
+            config=config,
+        ):
+            results.extend(
+                await self._execute_measurement_schedule_chunk_as_packed_timeline(
+                    runner=runner,
+                    schedules=chunk,
+                    config=config,
+                )
+            )
+        return results
+
+    async def _execute_measurement_schedule_chunk_as_packed_timeline(
+        self,
+        *,
+        runner: MeasurementScheduleRunner,
+        schedules: list[MeasurementSchedule],
+        config: MeasurementConfig,
+    ) -> list[MeasurementResult]:
+        """Execute one packed timeline chunk and split merged results per schedule."""
         split_plan = self._build_measurement_result_split_plan(schedules=schedules)
         merged_schedule = self._merge_measurement_schedules(
             schedules=schedules,
@@ -835,6 +857,84 @@ class MeasurementExecutionService:
             split_plan=split_plan,
         )
 
+    def _split_measurement_schedules_into_packed_timeline_chunks(
+        self,
+        *,
+        schedules: list[MeasurementSchedule],
+        config: MeasurementConfig,
+    ) -> list[list[MeasurementSchedule]]:
+        """Split schedules into packed timeline chunks within configured limits."""
+        limit = config.max_repeated_timeline_duration_ns
+        if limit is None:
+            return [schedules]
+
+        chunks: list[list[MeasurementSchedule]] = []
+        current_chunk: list[MeasurementSchedule] = []
+        for schedule in schedules:
+            if not self._packed_timeline_repeated_duration_within_limit(
+                schedules=[schedule],
+                config=config,
+            ):
+                repeated_duration = self._packed_timeline_repeated_duration_ns(
+                    schedules=[schedule],
+                    config=config,
+                )
+                raise ValueError(
+                    "A single measurement schedule exceeds "
+                    "`max_repeated_timeline_duration_ns`: "
+                    f"{repeated_duration} > {limit}."
+                )
+
+            candidate_chunk = [*current_chunk, schedule]
+            if (
+                current_chunk
+                and not self._packed_timeline_repeated_duration_within_limit(
+                    schedules=candidate_chunk,
+                    config=config,
+                )
+            ):
+                chunks.append(current_chunk)
+                current_chunk = [schedule]
+            else:
+                current_chunk = candidate_chunk
+
+        if current_chunk:
+            chunks.append(current_chunk)
+        return chunks
+
+    def _packed_timeline_repeated_duration_within_limit(
+        self,
+        *,
+        schedules: Sequence[MeasurementSchedule],
+        config: MeasurementConfig,
+    ) -> bool:
+        """Return whether repeated packed timeline duration is within the limit."""
+        limit = config.max_repeated_timeline_duration_ns
+        if limit is None:
+            return True
+        return (
+            self._packed_timeline_repeated_duration_ns(
+                schedules=schedules,
+                config=config,
+            )
+            <= limit
+        )
+
+    @staticmethod
+    def _packed_timeline_repeated_duration_ns(
+        *,
+        schedules: Sequence[MeasurementSchedule],
+        config: MeasurementConfig,
+    ) -> float:
+        """Return packed timeline duration in ns multiplied by shot count."""
+        if len(schedules) == 0:
+            return 0.0
+        duration_ns = sum(
+            float(schedule.pulse_schedule.duration) for schedule in schedules
+        )
+        duration_ns += float(config.shot_interval) * (len(schedules) - 1)
+        return duration_ns * config.n_shots
+
     def _should_pack_measurement_schedules(
         self,
         *,
@@ -846,7 +946,7 @@ class MeasurementExecutionService:
         del runner
         if len(schedules) <= 1:
             return False
-        if not config.should_pack_schedules_into_single_timeline:
+        if not config.should_use_schedule_packing:
             return False
         return self._can_merge_measurement_schedules(schedules=schedules)
 
@@ -1603,8 +1703,9 @@ class MeasurementExecutionService:
             shot_averaging=shot_averaging,
             time_integration=time_integration,
             state_classification=state_classification,
-            pack_schedules_into_single_timeline=(
-                self.config_loader.pack_schedules_into_single_timeline
+            schedule_packing_enabled=(self.config_loader.schedule_packing_enabled),
+            max_repeated_timeline_duration_ns=(
+                self.config_loader.schedule_packing_max_repeated_timeline_duration_ns
             ),
         )
 

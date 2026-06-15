@@ -113,6 +113,29 @@ def test_factory_maps_boolean_overrides() -> None:
     assert config.state_classification is True
 
 
+def test_factory_maps_packed_timeline_limit() -> None:
+    """Given packed timeline limit, when factory builds config, then config keeps it."""
+    experiment_system = type(
+        "_ES",
+        (),
+        {
+            "control_params": type("_CP", (), {"readout_amplitude": {}})(),
+            "measurement_defaults": {},
+        },
+    )()
+    factory = MeasurementConfigFactory(
+        experiment_system=cast(ExperimentSystem, experiment_system)
+    )
+
+    config = factory.create(
+        schedule_packing_enabled=True,
+        max_repeated_timeline_duration_ns=20_000_000_000,
+    )
+
+    assert config.schedule_packing_enabled is True
+    assert config.max_repeated_timeline_duration_ns == 20_000_000_000
+
+
 def test_factory_rejects_frequency_overrides() -> None:
     """Given frequency overrides, when factory builds config, then TypeError is raised."""
     experiment_system = type(
