@@ -832,7 +832,12 @@ def test_execute_prepares_alias_session_before_resolving_payload(
             )
 
     class _OrderProbeClient(_FakeClient):
-        def create_session(self, resource_ids: list[str]) -> _FakeSession:
+        def create_session(
+            self,
+            resource_ids: list[str],
+            **session_options: object,
+        ) -> _FakeSession:
+            del session_options
             events.append("open-session")
             return super().create_session(resource_ids)
 
@@ -1083,7 +1088,12 @@ class _FakeClient:
         del exc_type, exc, tb
         self.exit_calls += 1
 
-    def create_session(self, resource_ids: list[str]) -> _FakeSession:
+    def create_session(
+        self,
+        resource_ids: list[str],
+        **session_options: object,
+    ) -> _FakeSession:
+        del session_options
         del resource_ids
         return self._session
 
@@ -1747,7 +1757,12 @@ def test_execute_batch_async_reopens_session_per_payload(
     create_session_calls: list[tuple[str, ...]] = []
 
     class _CountingClient(_FakeClient):
-        def create_session(self, resource_ids: list[str]) -> _FakeSession:
+        def create_session(
+            self,
+            resource_ids: list[str],
+            **session_options: object,
+        ) -> _FakeSession:
+            del session_options
             create_session_calls.append(tuple(resource_ids))
             return super().create_session(resource_ids)
 

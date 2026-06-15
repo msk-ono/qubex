@@ -95,7 +95,7 @@ def test_deploy_instruments_calls_session_api(
         definition: _Definition
 
     deploy_calls: list[tuple[str, list[_Definition]]] = []
-    create_session_calls: list[tuple[str, ...]] = []
+    create_session_calls: list[tuple[tuple[str, ...], dict[str, object]]] = []
 
     class _FakeSession:
         async def __aenter__(self) -> _FakeSession:
@@ -138,8 +138,12 @@ def test_deploy_instruments_calls_session_api(
         ) -> None:
             _ = (exc_type, exc, tb)
 
-        def create_session(self, resource_ids: list[str]) -> _FakeSession:
-            create_session_calls.append(tuple(resource_ids))
+        def create_session(
+            self,
+            resource_ids: list[str],
+            **session_options: object,
+        ) -> _FakeSession:
+            create_session_calls.append((tuple(resource_ids), dict(session_options)))
             return _FakeSession()
 
     fake_client = _FakeClient()
@@ -166,7 +170,15 @@ def test_deploy_instruments_calls_session_api(
 
     deployed = manager.deploy_instruments(requests=(request,))
 
-    assert create_session_calls == [("quel3-02-a01:tx_p02",)]
+    assert create_session_calls == [
+        (
+            ("quel3-02-a01:tx_p02",),
+            {
+                "ttl_ms": 30_000,
+                "tentative_ttl_ms": 5_000,
+            },
+        )
+    ]
     assert len(deploy_calls) == 1
     port_id, definitions = deploy_calls[0]
     assert port_id == "quel3-02-a01:tx_p02"
@@ -280,7 +292,12 @@ def test_deploy_instruments_recreates_session_after_transient_request_failure(
             _ = (exc_type, exc, tb)
             self.exit_calls += 1
 
-        def create_session(self, resource_ids: list[str]) -> _FakeSession:
+        def create_session(
+            self,
+            resource_ids: list[str],
+            **session_options: object,
+        ) -> _FakeSession:
+            del session_options
             assert tuple(resource_ids) == ("quel3-02-a01:tx_p02",)
             return self._session
 
@@ -423,7 +440,12 @@ def test_deploy_instruments_ignores_session_close_failure_after_success(
             _ = (exc_type, exc, tb)
             self.exit_calls += 1
 
-        def create_session(self, resource_ids: list[str]) -> _FakeSession:
+        def create_session(
+            self,
+            resource_ids: list[str],
+            **session_options: object,
+        ) -> _FakeSession:
+            del session_options
             assert tuple(resource_ids) == ("quel3-02-a01:tx_p02",)
             return self._session
 
@@ -531,7 +553,12 @@ def test_deploy_instruments_wraps_final_request_failure(
             _ = (exc_type, exc, tb)
             self.exit_calls += 1
 
-        def create_session(self, resource_ids: list[str]) -> _FakeSession:
+        def create_session(
+            self,
+            resource_ids: list[str],
+            **session_options: object,
+        ) -> _FakeSession:
+            del session_options
             assert tuple(resource_ids) == ("quel3-02-a01:tx_p02",)
             return self._session
 
@@ -677,7 +704,12 @@ def test_deploy_instruments_retries_resource_allocation_on_session_create(
         ) -> None:
             _ = (exc_type, exc, tb)
 
-        def create_session(self, resource_ids: list[str]) -> object:
+        def create_session(
+            self,
+            resource_ids: list[str],
+            **session_options: object,
+        ) -> object:
+            del session_options
             self.create_session_calls.append(tuple(resource_ids))
             if len(self.create_session_calls) == 1:
                 return self.failing_context
@@ -796,7 +828,12 @@ def test_deploy_instruments_accepts_unit_prefixed_returned_alias(
         ) -> None:
             _ = (exc_type, exc, tb)
 
-        def create_session(self, resource_ids: list[str]) -> _FakeSession:
+        def create_session(
+            self,
+            resource_ids: list[str],
+            **session_options: object,
+        ) -> _FakeSession:
+            del session_options
             del resource_ids
             return _FakeSession()
 
@@ -933,7 +970,12 @@ def test_deploy_instruments_groups_requests_by_port(
         ) -> None:
             _ = (exc_type, exc, tb)
 
-        def create_session(self, resource_ids: list[str]) -> _FakeSession:
+        def create_session(
+            self,
+            resource_ids: list[str],
+            **session_options: object,
+        ) -> _FakeSession:
+            del session_options
             create_session_calls.append(tuple(resource_ids))
             return _FakeSession()
 
@@ -1064,7 +1106,12 @@ def test_deploy_instruments_uses_one_session_for_all_ports(
         ) -> None:
             _ = (exc_type, exc, tb)
 
-        def create_session(self, resource_ids: list[str]) -> _FakeSession:
+        def create_session(
+            self,
+            resource_ids: list[str],
+            **session_options: object,
+        ) -> _FakeSession:
+            del session_options
             create_session_calls.append(tuple(resource_ids))
             return _FakeSession()
 
@@ -1191,7 +1238,12 @@ def test_deploy_instruments_parallelizes_ports_by_default(
         ) -> None:
             _ = (exc_type, exc, tb)
 
-        def create_session(self, resource_ids: list[str]) -> _FakeSession:
+        def create_session(
+            self,
+            resource_ids: list[str],
+            **session_options: object,
+        ) -> _FakeSession:
+            del session_options
             del resource_ids
             return _FakeSession()
 
@@ -1314,7 +1366,12 @@ def test_deploy_instruments_parallel_false_serializes_ports(
         ) -> None:
             _ = (exc_type, exc, tb)
 
-        def create_session(self, resource_ids: list[str]) -> _FakeSession:
+        def create_session(
+            self,
+            resource_ids: list[str],
+            **session_options: object,
+        ) -> _FakeSession:
+            del session_options
             del resource_ids
             return _FakeSession()
 
@@ -1936,7 +1993,12 @@ def test_deploy_instruments_replaces_cached_alias(
         ) -> None:
             _ = (exc_type, exc, tb)
 
-        def create_session(self, resource_ids: list[str]) -> _FakeSession:
+        def create_session(
+            self,
+            resource_ids: list[str],
+            **session_options: object,
+        ) -> _FakeSession:
+            del session_options
             del resource_ids
             return _FakeSession()
 
@@ -2061,7 +2123,12 @@ def test_deploy_instruments_replaces_cached_port_in_one_batched_deploy(
         ) -> None:
             _ = (exc_type, exc, tb)
 
-        def create_session(self, resource_ids: list[str]) -> _FakeSession:
+        def create_session(
+            self,
+            resource_ids: list[str],
+            **session_options: object,
+        ) -> _FakeSession:
+            del session_options
             del resource_ids
             return _FakeSession()
 

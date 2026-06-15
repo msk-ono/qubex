@@ -72,7 +72,12 @@ class _FakeClient:
         self.failing_contexts: list[_FailingSessionContext] = []
         self.create_session_calls: list[tuple[str, ...]] = []
 
-    def create_session(self, resource_ids: tuple[str, ...]) -> object:
+    def create_session(
+        self,
+        resource_ids: tuple[str, ...],
+        **session_options: object,
+    ) -> object:
+        del session_options
         self.create_session_calls.append(tuple(resource_ids))
         if len(self.create_session_calls) <= self._failures_before_success:
             context = _FailingSessionContext(
@@ -190,7 +195,12 @@ def test_open_retries_when_failed_session_token_is_unavailable(
             self.failing_context = _FailingUnopenedSession()
             self.create_session_calls: list[tuple[str, ...]] = []
 
-        def create_session(self, resource_ids: tuple[str, ...]) -> object:
+        def create_session(
+            self,
+            resource_ids: tuple[str, ...],
+            **session_options: object,
+        ) -> object:
+            del session_options
             self.create_session_calls.append(tuple(resource_ids))
             if len(self.create_session_calls) == 1:
                 return self.failing_context
@@ -274,6 +284,46 @@ def test_open_captures_session_token_on_success(
 
     assert captured_session_id == "opened-session"
     assert closed_session_id is None
+
+
+def test_open_forwards_fixed_session_ttl_options() -> None:
+    """Given session open, manager should forward fixed ttl options to create_session."""
+    session = _SuccessfulSession()
+    create_session_calls: list[tuple[tuple[str, ...], dict[str, object]]] = []
+
+    class _FakeClientWithFixedSessionOptions:
+        def create_session(
+            self,
+            resource_ids: tuple[str, ...],
+            **session_options: object,
+        ) -> object:
+            create_session_calls.append((tuple(resource_ids), dict(session_options)))
+            return session
+
+    client = _FakeClientWithFixedSessionOptions()
+    client_context = _FakeClientContext(cast(Any, client))
+    manager = Quel3SessionManager()
+
+    async def _run() -> object:
+        opened_session = await manager.open(
+            ("inst-a",),
+            client_factory=cast(Any, lambda endpoint, port: client_context),
+        )
+        await manager.close()
+        return opened_session
+
+    opened_session = asyncio.run(_run())
+
+    assert opened_session is session
+    assert create_session_calls == [
+        (
+            ("inst-a",),
+            {
+                "ttl_ms": 30_000,
+                "tentative_ttl_ms": 5_000,
+            },
+        )
+    ]
 
 
 @pytest.mark.parametrize(

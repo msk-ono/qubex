@@ -236,6 +236,9 @@ class QuelwareClientProtocol(Protocol):
     def create_session(
         self,
         resource_ids: Iterable[ResourceIdProtocol],
+        *,
+        ttl_ms: int,
+        tentative_ttl_ms: int,
     ) -> AbstractAsyncContextManager[SessionProtocol]:
         """Create one execution session for selected resources."""
         ...
