@@ -815,16 +815,39 @@ class MeasurementExecutionService:
         config: MeasurementConfig,
     ) -> list[MeasurementResult]:
         """Execute packed timeline chunks and split merged results per schedule."""
-        results: list[MeasurementResult] = []
-        for chunk in self._split_measurement_schedules_into_packed_timeline_chunks(
+        chunks = self._split_measurement_schedules_into_packed_timeline_chunks(
             schedules=schedules,
             config=config,
-        ):
-            results.extend(
-                await self._execute_measurement_schedule_chunk_as_packed_timeline(
-                    runner=runner,
+        )
+        split_plans: list[MeasurementResultSplitPlan] = []
+        merged_schedules: list[MeasurementSchedule] = []
+        for chunk in chunks:
+            split_plans.append(
+                self._build_measurement_result_split_plan(schedules=chunk)
+            )
+            merged_schedules.append(
+                self._merge_measurement_schedules(
                     schedules=chunk,
-                    config=config,
+                    shot_interval=config.shot_interval,
+                )
+            )
+
+        merged_results = await runner.execute_many_async(
+            schedules=merged_schedules,
+            config=config,
+        )
+        if len(merged_results) != len(split_plans):
+            raise ValueError(
+                "Packed timeline batch execution returned an unexpected number "
+                f"of results: expected {len(split_plans)}, got {len(merged_results)}."
+            )
+
+        results: list[MeasurementResult] = []
+        for merged_result, split_plan in zip(merged_results, split_plans, strict=True):
+            results.extend(
+                self._split_merged_measurement_result(
+                    merged_result=merged_result,
+                    split_plan=split_plan,
                 )
             )
         return results
@@ -842,16 +865,16 @@ class MeasurementExecutionService:
             schedules=schedules,
             shot_interval=config.shot_interval,
         )
-
-        merged_request = runner._prepare_execution(  # noqa: SLF001
-            schedule=merged_schedule,
+        merged_results = await runner.execute_many_async(
+            schedules=[merged_schedule],
             config=config,
         )
-        merged_backend_result = await runner._execute_request(request=merged_request)  # noqa: SLF001
-        merged_measurement_result = runner._build_result(  # noqa: SLF001
-            backend_result=merged_backend_result,
-            config=config,
-        )
+        if len(merged_results) != 1:
+            raise ValueError(
+                "Packed timeline execution returned an unexpected number "
+                f"of results: expected 1, got {len(merged_results)}."
+            )
+        merged_measurement_result = merged_results[0]
         return self._split_merged_measurement_result(
             merged_result=merged_measurement_result,
             split_plan=split_plan,

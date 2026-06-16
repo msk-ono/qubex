@@ -69,13 +69,37 @@ class _FakeBackend:
     sampling_period_ns: ClassVar[float] = 0.4
     CAPTURE_DECIMATION_FACTOR: ClassVar[int] = 4
 
+    def __init__(self) -> None:
+        self.batch_request_groups: list[list[BackendExecutionRequest]] = []
+
     async def execute_batch_async(
         self,
         *,
         requests: list[BackendExecutionRequest],
     ) -> list[_BackendResult]:
-        del requests
-        return []
+        self.batch_request_groups.append(requests)
+        return [_backend_result_from_request(request) for request in requests]
+
+
+def _backend_result_from_request(request: BackendExecutionRequest) -> _BackendResult:
+    schedule = cast(MeasurementSchedule, request.payload)
+    visible_capture_count = sum(
+        0 if capture.is_workaround else len(capture.channels)
+        for capture in schedule.capture_schedule.captures
+    )
+    return _BackendResult(
+        status={},
+        data={
+            "Q00": [
+                np.array(
+                    [[float(index + 1) + 0.0j], [float(index + 1) + 0.0j]],
+                    dtype=np.complex128,
+                )
+                for index in range(visible_capture_count)
+            ],
+        },
+        config={"sampling_period_ns": 0.4},
+    )
 
 
 class _FakeRunner:
@@ -86,32 +110,37 @@ class _FakeRunner:
         **_: Any,
     ) -> None:
         self._measurement_backend_adapter = object()
+        self._backend_controller = _backend_controller
         self.prepare_calls: list[MeasurementSchedule] = []
         self.executed_requests: list[BackendExecutionRequest] = []
+        self.execute_many_calls: list[list[MeasurementSchedule]] = []
         self.build_chunks: list[tuple[str, ...]] = []
 
     async def _execute_request(
         self, *, request: BackendExecutionRequest
     ) -> _BackendResult:
         self.executed_requests.append(request)
-        schedule = cast(MeasurementSchedule, request.payload)
-        visible_capture_count = sum(
-            0 if capture.is_workaround else len(capture.channels)
-            for capture in schedule.capture_schedule.captures
+        return _backend_result_from_request(request)
+
+    async def execute_many_async(
+        self,
+        *,
+        schedules: list[MeasurementSchedule] | tuple[MeasurementSchedule, ...],
+        config: MeasurementConfig,
+    ) -> list[MeasurementResult]:
+        self.execute_many_calls.append([*schedules])
+        requests = [
+            self._prepare_execution(schedule=schedule, config=config)
+            for schedule in schedules
+        ]
+        self.executed_requests.extend(requests)
+        backend_results = await self._backend_controller.execute_batch_async(
+            requests=requests
         )
-        return _BackendResult(
-            status={},
-            data={
-                "Q00": [
-                    np.array(
-                        [[float(index + 1) + 0.0j], [float(index + 1) + 0.0j]],
-                        dtype=np.complex128,
-                    )
-                    for index in range(visible_capture_count)
-                ],
-            },
-            config={"sampling_period_ns": 0.4},
-        )
+        return [
+            self._build_result(backend_result=backend_result, config=config)
+            for backend_result in backend_results
+        ]
 
     def _prepare_execution(
         self,
@@ -283,6 +312,10 @@ def test_run_sweep_measurement_splits_packed_timelines_by_repeated_duration(
     runner = runners[0]
     assert len(runner.prepare_calls) == 2
     assert len(runner.executed_requests) == 2
+    assert len(runner.execute_many_calls) == 1
+    assert len(runner.execute_many_calls[0]) == 2
+    assert len(backend.batch_request_groups) == 1
+    assert len(backend.batch_request_groups[0]) == 2
     assert [
         len(schedule.capture_schedule.captures) for schedule in runner.prepare_calls
     ] == [
