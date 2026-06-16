@@ -25,6 +25,7 @@ Quel1MeasurementBackendAdapter = _measurement_adapters.Quel1MeasurementBackendAd
 Quel3MeasurementBackendAdapter = _measurement_adapters.Quel3MeasurementBackendAdapter
 
 ExecutionMode = Literal["serial", "parallel"]
+_NO_ADAPTER_EXECUTION_STATE = object()
 
 
 class MeasurementScheduleRunner:
@@ -118,6 +119,33 @@ class MeasurementScheduleRunner:
             sampling_period=sampling_period,
         )
 
+    def _snapshot_adapter_execution_state(self) -> object:
+        """Return adapter state needed to convert the next backend result."""
+        snapshot_state = getattr(
+            self._measurement_backend_adapter,
+            "snapshot_execution_state",
+            None,
+        )
+        if not callable(snapshot_state):
+            return _NO_ADAPTER_EXECUTION_STATE
+        return snapshot_state()
+
+    def _restore_adapter_execution_state(self, state: object) -> None:
+        """Restore adapter state before converting one backend result."""
+        if state is _NO_ADAPTER_EXECUTION_STATE:
+            return
+        restore_state = getattr(
+            self._measurement_backend_adapter,
+            "restore_execution_state",
+            None,
+        )
+        if not callable(restore_state):
+            raise TypeError(
+                "Measurement backend adapter defines `snapshot_execution_state` "
+                "but not `restore_execution_state`."
+            )
+        restore_state(state)
+
     def execute_sync(
         self,
         *,
@@ -203,21 +231,31 @@ class MeasurementScheduleRunner:
             getattr(self._backend_controller, "execute_batch_async", None),
         )
         if callable(execute_batch_async):
-            requests = [
-                self._prepare_execution(
-                    schedule=schedule,
-                    config=config,
+            requests: list[BackendExecutionRequest] = []
+            execution_states: list[object] = []
+            for schedule in schedules:
+                requests.append(
+                    self._prepare_execution(
+                        schedule=schedule,
+                        config=config,
+                    )
                 )
-                for schedule in schedules
-            ]
+                execution_states.append(self._snapshot_adapter_execution_state())
             backend_results = await execute_batch_async(requests=requests)
-            return [
-                self._build_result(
-                    backend_result=backend_result,
-                    config=config,
+            results: list[MeasurementResult] = []
+            for backend_result, execution_state in zip(
+                backend_results,
+                execution_states,
+                strict=True,
+            ):
+                self._restore_adapter_execution_state(execution_state)
+                results.append(
+                    self._build_result(
+                        backend_result=backend_result,
+                        config=config,
+                    )
                 )
-                for backend_result in backend_results
-            ]
+            return results
 
         if len(schedules) == 0:
             return []

@@ -465,6 +465,85 @@ def test_execute_many_async_uses_backend_batch_api_when_available() -> None:
     assert results == [expected, expected]
 
 
+def test_execute_many_async_restores_adapter_state_for_each_batch_result() -> None:
+    """Given stateful adapter, execute_many_async should build each result with request state."""
+    schedules = [_make_schedule(), _make_schedule()]
+    config = _make_config()
+
+    class _Adapter:
+        def __init__(self) -> None:
+            self.current_state: str | None = None
+            self.restored_states: list[str] = []
+
+        def validate_schedule(self, schedule: MeasurementSchedule) -> None:
+            _ = schedule
+
+        def build_execution_request(
+            self,
+            *,
+            schedule: MeasurementSchedule,
+            config: MeasurementConfig,
+        ) -> BackendExecutionRequest:
+            _ = config
+            self.current_state = "first" if schedule is schedules[0] else "second"
+            return BackendExecutionRequest(payload=self.current_state)
+
+        def snapshot_execution_state(self) -> object:
+            assert self.current_state is not None
+            return self.current_state
+
+        def restore_execution_state(self, state: object) -> None:
+            restored_state = cast(str, state)
+            self.restored_states.append(restored_state)
+            self.current_state = restored_state
+
+        def build_measurement_result(
+            self,
+            *,
+            backend_result: object,
+            measurement_config: MeasurementConfig,
+            device_config: dict[str, object],
+            sampling_period: float,
+        ) -> MeasurementResult:
+            _ = (device_config, sampling_period)
+            return MeasurementResult(
+                data={},
+                measurement_config=measurement_config,
+                device_config={
+                    "backend_result": backend_result,
+                    "request_state": self.current_state,
+                },
+            )
+
+    class _BackendController:
+        sampling_period_ns: ClassVar[float] = 2.0
+        CAPTURE_DECIMATION_FACTOR: ClassVar[int] = 4
+
+        async def execute_batch_async(
+            self, *, requests: list[BackendExecutionRequest]
+        ) -> list[str]:
+            return [f"result-for-{request.payload}" for request in requests]
+
+    adapter = _Adapter()
+    runner = MeasurementScheduleRunner(
+        measurement_backend_adapter=cast(Any, adapter),
+        backend_controller=cast(Any, _BackendController()),
+    )
+
+    results = asyncio.run(
+        runner.execute_many_async(
+            schedules=schedules,
+            config=config,
+        )
+    )
+
+    assert adapter.restored_states == ["first", "second"]
+    assert [result.device_config for result in results] == [
+        {"backend_result": "result-for-first", "request_state": "first"},
+        {"backend_result": "result-for-second", "request_state": "second"},
+    ]
+
+
 def test_execute_async_prefers_adapter_measurement_result_builder_when_available() -> (
     None
 ):

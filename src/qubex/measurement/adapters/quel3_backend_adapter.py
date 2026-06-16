@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 from collections import defaultdict
 from collections.abc import Mapping
+from dataclasses import dataclass
 
 import numpy as np
 from qxpulse import Blank, Pulse, PulseArray
@@ -38,6 +39,14 @@ from qubex.system.target_type import TargetType
 from ._capture_shape import normalize_shot_averaged_capture_array
 
 InstrumentAliasMap = Mapping[tuple[str, str], str]
+
+
+@dataclass(frozen=True)
+class _Quel3ExecutionState:
+    """Adapter metadata needed to convert one QuEL-3 backend result."""
+
+    output_target_labels_by_target: dict[str, str]
+    capture_targets_by_alias: dict[str, list[str]]
 
 
 def _as_read_only_array(data: object) -> np.ndarray:
@@ -201,6 +210,28 @@ class Quel3MeasurementBackendAdapter:
         )
         self._capture_targets_by_alias = self._build_capture_targets_by_alias(payload)
         return BackendExecutionRequest(payload=payload)
+
+    def snapshot_execution_state(self) -> object:
+        """Return result-conversion metadata for the most recently built request."""
+        return _Quel3ExecutionState(
+            output_target_labels_by_target=dict(self._output_target_labels_by_target),
+            capture_targets_by_alias={
+                alias: [*targets]
+                for alias, targets in self._capture_targets_by_alias.items()
+            },
+        )
+
+    def restore_execution_state(self, state: object) -> None:
+        """Restore result-conversion metadata captured from one request."""
+        if not isinstance(state, _Quel3ExecutionState):
+            raise TypeError("Invalid QuEL-3 execution state.")
+        self._output_target_labels_by_target = dict(
+            state.output_target_labels_by_target
+        )
+        self._capture_targets_by_alias = {
+            alias: [*targets]
+            for alias, targets in state.capture_targets_by_alias.items()
+        }
 
     def build_measurement_result(
         self,
