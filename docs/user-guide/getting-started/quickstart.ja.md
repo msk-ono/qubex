@@ -46,6 +46,16 @@ exp.connect()
 exp.configure()
 ```
 
+QuEL-1 で反映予定の差分を確認したい場合は、push する前に preview できます。
+
+```python
+preview = exp.preview_configure()
+preview.print_summary()
+preview.print_full()
+
+exp.configure(dry_run=True)
+```
+
 > [!CAUTION]
 > この操作は装置の状態を変更します。共有システムでは、同じ装置を利用している他ユーザーに影響する可能性があります。
 

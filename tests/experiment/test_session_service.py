@@ -15,6 +15,7 @@ class _SystemManagerStub:
     def __init__(self, calls: list[tuple[str, dict[str, object]]]) -> None:
         self._calls = calls
         self.backend_settings: dict[str, object] = {}
+        self.configure_preview = _PreviewStub(calls)
 
     def load(self, **kwargs: object) -> None:
         self._calls.append(("system_manager.load", dict(kwargs)))
@@ -22,8 +23,20 @@ class _SystemManagerStub:
     def push(self, **kwargs: object) -> None:
         self._calls.append(("system_manager.push", dict(kwargs)))
 
+    def preview_configure(self, **kwargs: object) -> _PreviewStub:
+        self._calls.append(("system_manager.preview_configure", dict(kwargs)))
+        return self.configure_preview
+
     def is_synced(self, *, box_ids: list[str]) -> bool:
         return len(box_ids) > 0
+
+
+class _PreviewStub:
+    def __init__(self, calls: list[tuple[str, dict[str, object]]]) -> None:
+        self._calls = calls
+
+    def print_summary(self) -> None:
+        self._calls.append(("preview.print_summary", {}))
 
 
 class _ExperimentSystemStub:
@@ -249,6 +262,86 @@ def test_configure_reloads_with_active_system_id(monkeypatch) -> None:
             "configuration_mode": "ge-cr-cr",
         },
     )
+
+
+def test_preview_configure_uses_system_manager_without_push(monkeypatch) -> None:
+    """Given preview request, SessionService should build preview without pushing hardware."""
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    context = _ContextStub(
+        system_manager=_SystemManagerStub(calls),
+        measurement=_MeasurementStub(calls),
+        config_path="config-dir",
+        params_path="params-dir",
+        calls=calls,
+    )
+    monkeypatch.setattr(
+        SessionService,
+        "_sync_pulse_sampling_period",
+        lambda self: 0.4,
+    )
+
+    service = SessionService(
+        experiment_context=cast(ExperimentContext, context),
+    )
+
+    preview = service.preview_configure(box_ids="Q2A", exclude="Q00", mode=None)
+
+    assert preview is context.system_manager.configure_preview
+    assert calls == [
+        (
+            "system_manager.preview_configure",
+            {
+                "chip_id": "64Qv2",
+                "system_id": "64Qv2-Q1",
+                "config_dir": "config-dir",
+                "params_dir": "params-dir",
+                "targets_to_exclude": ["Q00"],
+                "configuration_mode": "ge-cr-cr",
+                "box_ids": ["Q2A"],
+            },
+        )
+    ]
+
+
+def test_configure_dry_run_prints_preview_without_load_or_push(monkeypatch) -> None:
+    """Given dry_run configure, SessionService should print preview and skip push."""
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    context = _ContextStub(
+        system_manager=_SystemManagerStub(calls),
+        measurement=_MeasurementStub(calls),
+        config_path="config-dir",
+        params_path="params-dir",
+        calls=calls,
+    )
+    monkeypatch.setattr(
+        SessionService,
+        "_sync_pulse_sampling_period",
+        lambda self: 0.4,
+    )
+
+    service = SessionService(
+        experiment_context=cast(ExperimentContext, context),
+    )
+
+    service.configure(box_ids="Q2A", exclude="Q00", mode=None, dry_run=True)
+
+    assert calls == [
+        (
+            "system_manager.preview_configure",
+            {
+                "chip_id": "64Qv2",
+                "system_id": "64Qv2-Q1",
+                "config_dir": "config-dir",
+                "params_dir": "params-dir",
+                "targets_to_exclude": ["Q00"],
+                "configuration_mode": "ge-cr-cr",
+                "box_ids": ["Q2A"],
+            },
+        ),
+        ("preview.print_summary", {}),
+    ]
 
 
 def test_reset_awg_and_capunits_delegates_to_experiment_context(

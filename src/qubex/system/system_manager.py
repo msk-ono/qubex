@@ -28,6 +28,11 @@ from qubex.constants import (
 from qubex.typing import ConfigurationMode
 
 from .config_loader import ConfigLoader
+from .configure_preview import (
+    ConfigurePreview,
+    ConfigurePreviewProvider,
+    Quel1ConfigurePreviewProvider,
+)
 from .control_system import Box
 from .experiment_system import ExperimentSystem
 from .quel1.quel1_system_synchronizer import Quel1SystemSynchronizer
@@ -465,6 +470,71 @@ class SystemManager:
             raise
         self._update_cached_state()
 
+    def preview_configure(
+        self,
+        *,
+        chip_id: str | None = None,
+        system_id: str | None = None,
+        config_dir: Path | str | None = None,
+        params_dir: Path | str | None = None,
+        targets_to_exclude: list[str] | None = None,
+        configuration_mode: ConfigurationMode | None = None,
+        box_ids: Sequence[str],
+        parallel: bool | None = None,
+    ) -> ConfigurePreview:
+        """
+        Preview device state changes that `configure()` would apply.
+
+        Parameters
+        ----------
+        chip_id : str | None, optional
+            Deprecated chip identifier compatibility input.
+        system_id : str | None, optional
+            Canonical system identifier.
+        config_dir : Path | str | None, optional
+            Directory containing configuration files.
+        params_dir : Path | str | None, optional
+            Directory containing parameter files.
+        targets_to_exclude : list[str] | None, optional
+            Target labels to exclude from the previewed model.
+        configuration_mode : ConfigurationMode | None, optional
+            Configuration mode to preview.
+        box_ids : Sequence[str]
+            Box IDs to compare against current hardware settings.
+        parallel : bool | None, optional
+            Whether to fetch per-box hardware settings in parallel.
+
+        Returns
+        -------
+        ConfigurePreview
+            Structured summary of field-level changes.
+
+        Notes
+        -----
+        This method fetches hardware state but does not mutate manager,
+        backend-controller, or hardware configuration state.
+        """
+        preview_experiment_system, backend_kind = self._load_preview_experiment_system(
+            chip_id=chip_id,
+            system_id=system_id,
+            config_dir=config_dir,
+            params_dir=params_dir,
+            targets_to_exclude=targets_to_exclude,
+            configuration_mode=configuration_mode,
+        )
+        provider = self._create_configure_preview_provider(backend_kind)
+        fetched_backend_settings = self._fetch_backend_settings_for_experiment_system(
+            experiment_system=preview_experiment_system,
+            box_ids=box_ids,
+            parallel=parallel,
+        )
+        return provider.build_preview(
+            experiment_system=preview_experiment_system,
+            backend_settings=fetched_backend_settings,
+            box_ids=box_ids,
+            mode=configuration_mode,
+        )
+
     def push(
         self,
         box_ids: Sequence[str],
@@ -717,6 +787,74 @@ This operation will overwrite the existing backend settings. Do you want to cont
             parallel=parallel,
         )
         return BackendSettings(fetched)
+
+    def _fetch_backend_settings_for_experiment_system(
+        self,
+        *,
+        experiment_system: ExperimentSystem,
+        box_ids: Sequence[str],
+        parallel: bool | None = None,
+    ) -> BackendSettings:
+        """
+        Fetch raw backend settings using an explicit experiment-system model.
+
+        Parameters
+        ----------
+        experiment_system : ExperimentSystem
+            Experiment-system model used to resolve backend fetch targets.
+        box_ids : Sequence[str]
+            Box IDs to read from hardware.
+        parallel : bool | None, optional
+            Whether to perform concurrent per-box reads.
+        """
+        system_synchronizer = self._resolve_system_synchronizer()
+        if system_synchronizer is None:
+            return BackendSettings()
+        fetched = system_synchronizer.fetch_backend_settings_from_hardware(
+            experiment_system=experiment_system,
+            box_ids=box_ids,
+            parallel=parallel,
+        )
+        return BackendSettings(fetched)
+
+    def _load_preview_experiment_system(
+        self,
+        *,
+        chip_id: str | None,
+        system_id: str | None,
+        config_dir: Path | str | None,
+        params_dir: Path | str | None,
+        targets_to_exclude: list[str] | None,
+        configuration_mode: ConfigurationMode | None,
+    ) -> tuple[ExperimentSystem, BackendKind]:
+        """Load the would-be experiment system without mutating manager state."""
+        config_loader = ConfigLoader(
+            chip_id=chip_id,
+            system_id=system_id,
+            config_dir=config_dir,
+            params_dir=params_dir,
+            autoload=False,
+        )
+        config_loader.load(
+            targets_to_exclude=targets_to_exclude,
+            configuration_mode=configuration_mode,
+        )
+        return config_loader.get_experiment_system(), config_loader.backend_kind
+
+    @staticmethod
+    def _create_configure_preview_provider(
+        backend_kind: BackendKind,
+    ) -> ConfigurePreviewProvider:
+        """Create a backend-specific configure-preview provider."""
+        if backend_kind == BACKEND_KIND_QUEL1:
+            return Quel1ConfigurePreviewProvider()
+        if backend_kind == BACKEND_KIND_QUEL3:
+            raise NotImplementedError(
+                "Configure preview is not implemented for QuEL-3 yet."
+            )
+        raise NotImplementedError(
+            f"Configure preview is not implemented for backend kind: {backend_kind}."
+        )
 
     def _sync_backend_settings_to_backend_controller(
         self,

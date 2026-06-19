@@ -52,6 +52,17 @@ parameter settings to the instruments.
 exp.configure()
 ```
 
+Preview the planned QuEL-1 changes before pushing when you need to check what
+would change.
+
+```python
+preview = exp.preview_configure()
+preview.print_summary()
+preview.print_full()
+
+exp.configure(dry_run=True)
+```
+
 > [!CAUTION]
 > This operation changes the state of the instruments. On shared systems, it
 > can affect other users who are using the same instruments.
