@@ -8,6 +8,7 @@ from collections.abc import Collection
 from qubex.experiment.experiment_context import ExperimentContext
 from qubex.measurement import Measurement
 from qubex.pulse import set_sampling_period
+from qubex.system import ConfigurePreview
 from qubex.typing import ConfigurationMode
 
 logger = logging.getLogger(__name__)
@@ -152,6 +153,7 @@ class SessionService:
         exclude: str | list[str] | None = None,
         mode: ConfigurationMode | None = None,
         confirm: bool = True,
+        dry_run: bool = False,
     ) -> None:
         """Reload configuration through SystemManager and push to boxes."""
         if isinstance(box_ids, str):
@@ -160,6 +162,15 @@ class SessionService:
             exclude = [exclude]
         if mode is None:
             mode = self.ctx.configuration_mode
+
+        if dry_run:
+            preview = self.preview_configure(
+                box_ids=box_ids,
+                exclude=exclude,
+                mode=mode,
+            )
+            preview.print_summary()
+            return
 
         system_manager = self.ctx.system_manager
         system_manager.load(
@@ -177,6 +188,33 @@ class SessionService:
             confirm=confirm,
         )
         self._sync_pulse_sampling_period()
+
+    def preview_configure(
+        self,
+        *,
+        box_ids: str | list[str] | None = None,
+        exclude: str | list[str] | None = None,
+        mode: ConfigurationMode | None = None,
+    ) -> ConfigurePreview:
+        """Preview configuration changes without pushing them to hardware."""
+        if isinstance(box_ids, str):
+            box_ids = [box_ids]
+        if isinstance(exclude, str):
+            exclude = [exclude]
+        if mode is None:
+            mode = self.ctx.configuration_mode
+
+        resolved_box_ids = box_ids or self.ctx.box_ids
+        return self.ctx.system_manager.preview_configure(
+            chip_id=self.ctx.chip_id,
+            system_id=self.ctx.config_loader.system_id,
+            config_dir=self.ctx.config_path,
+            params_dir=self.ctx.params_path,
+            targets_to_exclude=exclude,
+            configuration_mode=mode,
+            box_ids=resolved_box_ids,
+            target_labels=list(self.ctx.targets),
+        )
 
     def reset_awg_and_capunits(
         self,

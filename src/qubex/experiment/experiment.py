@@ -46,6 +46,7 @@ from qubex.system import (
     Box,
     Chip,
     ConfigLoader,
+    ConfigurePreview,
     ControlParameters,
     ControlSystem,
     ExperimentSystem,
@@ -803,6 +804,7 @@ class Experiment:
         exclude: str | list[str] | None = None,
         mode: ConfigurationMode | None = None,
         confirm: bool = True,
+        dry_run: bool = False,
     ) -> None:
         """Configure hardware targets and push settings to devices."""
         return self.session_service.configure(
@@ -810,6 +812,20 @@ class Experiment:
             exclude=exclude,
             mode=mode,
             confirm=confirm,
+            dry_run=dry_run,
+        )
+
+    def preview_configure(
+        self,
+        box_ids: str | list[str] | None = None,
+        exclude: str | list[str] | None = None,
+        mode: ConfigurationMode | None = None,
+    ) -> ConfigurePreview:
+        """Preview hardware settings that `configure()` would change."""
+        return self.session_service.preview_configure(
+            box_ids=box_ids,
+            exclude=exclude,
+            mode=mode,
         )
 
     def reload(self) -> None:
