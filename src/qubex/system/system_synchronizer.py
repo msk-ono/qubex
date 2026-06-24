@@ -7,8 +7,10 @@ from typing import TYPE_CHECKING, Protocol
 
 if TYPE_CHECKING:
     from qubex.backend.backend_controller import SystemBackendController
+    from qubex.system.configure_preview import ConfigurePreview
     from qubex.system.control_system import Box
     from qubex.system.experiment_system import ExperimentSystem
+    from qubex.typing import ConfigurationMode
 
 
 class SystemSynchronizer(Protocol):
@@ -55,6 +57,18 @@ class SystemSynchronizer(Protocol):
         parallel: bool | None = None,
     ) -> dict[str, dict]:
         """Fetch raw backend settings from hardware for selected boxes."""
+        ...
+
+    def preview_configure(
+        self,
+        *,
+        experiment_system: ExperimentSystem,
+        box_ids: Sequence[str],
+        mode: ConfigurationMode | None,
+        parallel: bool | None = None,
+        target_labels: Sequence[str] | None = None,
+    ) -> ConfigurePreview:
+        """Preview backend-specific hardware changes for `configure()`."""
         ...
 
     def sync_backend_settings_to_backend_controller(

@@ -8,7 +8,7 @@ from typing import Any, cast
 from qubex.backend.backend_controller import BACKEND_KIND_QUEL3
 from qubex.backend.quel3.models import InstrumentDeployRequest
 from qubex.system import ConfigurePreview, ConfigureStateChange
-from qubex.system.quel3 import Quel3ConfigurePreviewProvider
+from qubex.system.quel3 import Quel3ConfigurePreviewProvider, Quel3SystemSynchronizer
 
 
 class _ExperimentSystemStub:
@@ -319,3 +319,83 @@ def test_preview_configure_keeps_before_unknown_for_ambiguous_port_match() -> No
         ),
     )
 
+
+def test_synchronizer_preview_configure_fetches_and_plans() -> None:
+    """Given QuEL-3 synchronizer, preview should compare fetched settings to deploy plan."""
+    planner_calls: list[dict[str, object]] = []
+    fetch_calls: list[dict[str, object]] = []
+    request = _request(frequency_range_max_hz=4.4e9)
+
+    class _FakeDeployPlanner:
+        def build_deploy_requests(
+            self,
+            *,
+            experiment_system: object,
+            box_ids: list[str],
+            target_labels: list[str] | None = None,
+        ) -> tuple[InstrumentDeployRequest, ...]:
+            planner_calls.append(
+                {
+                    "experiment_system": experiment_system,
+                    "box_ids": box_ids,
+                    "target_labels": target_labels,
+                }
+            )
+            return (request,)
+
+    class _FakeConfigurationManager:
+        def fetch_backend_settings_from_hardware(
+            self,
+            *,
+            unit_labels_by_box_id: dict[str, str],
+            parallel: bool | None = None,
+        ) -> dict[str, dict]:
+            fetch_calls.append(
+                {
+                    "unit_labels_by_box_id": unit_labels_by_box_id,
+                    "parallel": parallel,
+                }
+            )
+            return _backend_settings(frequency_range_max_hz=4.3e9)
+
+    backend_controller = SimpleNamespace(
+        configuration_manager=_FakeConfigurationManager()
+    )
+    synchronizer = Quel3SystemSynchronizer(
+        backend_controller=cast(Any, backend_controller),
+        deploy_planner=cast(Any, _FakeDeployPlanner()),
+    )
+    experiment_system = _ExperimentSystemStub()
+
+    preview = synchronizer.preview_configure(
+        experiment_system=cast(Any, experiment_system),
+        box_ids=["BOX1"],
+        mode="ge-cr-cr",
+        parallel=False,
+        target_labels=["Q00"],
+    )
+
+    assert planner_calls == [
+        {
+            "experiment_system": experiment_system,
+            "box_ids": ["BOX1"],
+            "target_labels": ["Q00"],
+        }
+    ]
+    assert fetch_calls == [
+        {
+            "unit_labels_by_box_id": {"BOX1": "quel3-02-a01"},
+            "parallel": False,
+        }
+    ]
+    assert preview.changes == (
+        ConfigureStateChange(
+            box_id="BOX1",
+            component="tx_p02 Q00",
+            field="frequency_range_max",
+            before=4_300_000_000,
+            after=4_400_000_000,
+            unit="Hz",
+            is_frequency=True,
+        ),
+    )

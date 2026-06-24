@@ -208,8 +208,10 @@ class Quel1SystemSynchronizer:
         box_ids: Sequence[str],
         mode: ConfigurationMode | None,
         parallel: bool | None = None,
+        target_labels: Sequence[str] | None = None,
     ) -> ConfigurePreview:
         """Preview QuEL-1 hardware changes for `configure()`."""
+        del target_labels
         backend_settings = self.fetch_backend_settings_from_hardware(
             experiment_system=experiment_system,
             box_ids=box_ids,
