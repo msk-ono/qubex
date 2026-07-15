@@ -20,6 +20,10 @@ from .payload import (
     Quel3WaveformEvent,
 )
 from .result import Quel3BackendExecutionResult
+from .spectroscopy import (
+    Quel3QubitSpectroscopyResult,
+    Quel3ResonatorSpectroscopyResult,
+)
 
 __all__ = [
     "InstrumentDeployRequest",
@@ -35,6 +39,8 @@ __all__ = [
     "Quel3InstrumentState",
     "Quel3PortDiagnostic",
     "Quel3PortState",
+    "Quel3QubitSpectroscopyResult",
+    "Quel3ResonatorSpectroscopyResult",
     "Quel3UnitState",
     "Quel3Waveform",
     "Quel3WaveformEvent",
