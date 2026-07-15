@@ -933,3 +933,139 @@ def test_qubit_scan_rejects_invalid_settings(
         )
 
     assert execution_manager.calls == []
+
+
+def test_controller_delegates_resonator_scan_with_resolved_target() -> None:
+    """The controller should delegate a resonator target without resolving it."""
+    from qubex.backend.quel3 import Quel3BackendController
+
+    calls: list[dict[str, object]] = []
+    expected = SimpleNamespace(frequency_range=np.array([6.0]))
+    spectroscopy_manager = SimpleNamespace(
+        scan_resonator_frequencies=lambda **kwargs: calls.append(kwargs) or expected,
+    )
+    controller = Quel3BackendController(
+        spectroscopy_manager=spectroscopy_manager,  # type: ignore[arg-type]
+    )
+
+    result = controller.scan_resonator_frequencies(
+        "R00",
+        frequency_range=[6.0],
+        readout_amplitude=0.25,
+        readout_duration=16.0,
+        capture_delay=8.0,
+        capture_length=8.0,
+        point_interval=16.0,
+        n_shots=4,
+        shot_interval=100.0,
+        capture_mode=Quel3CaptureMode.AVERAGED_VALUE,
+    )
+
+    assert result is expected
+    assert calls[0]["target"] == "R00"
+    assert calls[0]["frequency_range"] == [6.0]
+    assert calls[0]["n_shots"] == 4
+    assert calls[0]["capture_mode"] is Quel3CaptureMode.AVERAGED_VALUE
+
+
+def test_controller_delegates_qubit_scan_with_two_resolved_targets() -> None:
+    """The controller should delegate both qubit scan targets unchanged."""
+    from qubex.backend.quel3 import Quel3BackendController
+
+    calls: list[dict[str, object]] = []
+    expected = SimpleNamespace(frequency_range=np.array([4.0]))
+    spectroscopy_manager = SimpleNamespace(
+        scan_qubit_frequencies=lambda **kwargs: calls.append(kwargs) or expected,
+    )
+    controller = Quel3BackendController(
+        spectroscopy_manager=spectroscopy_manager,  # type: ignore[arg-type]
+    )
+
+    result = controller.scan_qubit_frequencies(
+        "Q00",
+        readout_target="R00",
+        frequency_range=[4.0],
+        readout_frequency=6.2,
+        control_amplitude=0.2,
+        control_duration=4.0,
+        readout_amplitude=0.25,
+        readout_duration=3.2,
+        control_to_readout_gap=2.0,
+        capture_delay=1.0,
+        capture_length=2.4,
+        point_interval=10.0,
+        n_shots=4,
+        shot_interval=100.0,
+        capture_mode=Quel3CaptureMode.VALUES_PER_ITER,
+    )
+
+    assert result is expected
+    assert calls[0]["target"] == "Q00"
+    assert calls[0]["readout_target"] == "R00"
+    assert calls[0]["readout_frequency"] == pytest.approx(6.2)
+    assert calls[0]["capture_mode"] is Quel3CaptureMode.VALUES_PER_ITER
+
+
+def test_controller_delegates_resonator_scan_async() -> None:
+    """The async controller API should delegate to the async manager entrypoint."""
+    from qubex.backend.quel3 import Quel3BackendController
+
+    calls: list[dict[str, object]] = []
+    expected = SimpleNamespace(frequency_range=np.array([6.0]))
+
+    async def _scan_resonator_frequencies_async(**kwargs: object) -> object:
+        calls.append(kwargs)
+        return expected
+
+    spectroscopy_manager = SimpleNamespace(
+        scan_resonator_frequencies_async=_scan_resonator_frequencies_async,
+    )
+    controller = Quel3BackendController(
+        spectroscopy_manager=spectroscopy_manager,  # type: ignore[arg-type]
+    )
+
+    result = asyncio.run(
+        controller.scan_resonator_frequencies_async(
+            "R00",
+            frequency_range=[6.0],
+            readout_amplitude=0.25,
+            readout_duration=16.0,
+            capture_delay=8.0,
+            capture_length=8.0,
+            point_interval=16.0,
+            n_shots=4,
+            shot_interval=100.0,
+        )
+    )
+
+    assert result is expected
+    assert calls[0]["target"] == "R00"
+
+
+def test_controller_delegates_ambiguous_spectroscopy_target() -> None:
+    """The controller should leave ambiguous target handling to the manager."""
+    from qubex.backend.quel3 import Quel3BackendController
+
+    calls: list[dict[str, object]] = []
+    expected = SimpleNamespace(frequency_range=np.array([6.0]))
+    spectroscopy_manager = SimpleNamespace(
+        scan_resonator_frequencies=lambda **kwargs: calls.append(kwargs) or expected,
+    )
+    controller = Quel3BackendController(
+        spectroscopy_manager=spectroscopy_manager,  # type: ignore[arg-type]
+    )
+
+    result = controller.scan_resonator_frequencies(
+        "R00",
+        frequency_range=[6.0],
+        readout_amplitude=0.25,
+        readout_duration=16.0,
+        capture_delay=8.0,
+        capture_length=8.0,
+        point_interval=16.0,
+        n_shots=1,
+        shot_interval=0.0,
+    )
+
+    assert result is expected
+    assert calls[0]["target"] == "R00"
