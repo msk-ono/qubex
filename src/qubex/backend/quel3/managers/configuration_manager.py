@@ -170,10 +170,22 @@ class Quel3ConfigurationManager:
     ) -> dict[str, tuple[InstrumentInfoProtocol, ...]]:
         """Deploy instruments for the provided QuEL-3 requests."""
         return _run_async(
-            lambda: self._deploy_instruments(
+            lambda: self.deploy_instruments_async(
                 requests=tuple(requests),
                 parallel=parallel,
             )
+        )
+
+    async def deploy_instruments_async(
+        self,
+        *,
+        requests: Sequence[InstrumentDeployRequest],
+        parallel: bool = True,
+    ) -> dict[str, tuple[InstrumentInfoProtocol, ...]]:
+        """Deploy instruments asynchronously for the provided requests."""
+        return await self._deploy_instruments(
+            requests=tuple(requests),
+            parallel=parallel,
         )
 
     def refresh_instrument_cache(self) -> dict[str, tuple[InstrumentInfoProtocol, ...]]:
