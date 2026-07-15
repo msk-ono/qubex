@@ -315,16 +315,18 @@ class Quel3BackendController(BackendController):
         shot_interval : float
             Additional interval after each packed timeline in ns.
         max_points_per_batch : int, optional
-            Maximum frequency points packed into one waveform payload.
+            Maximum frequency points packed into one waveform payload. Point
+            capture modes use one payload per resonator frequency.
         capture_mode : Quel3CaptureMode, optional
-            Capture representation. The supported value is `AVERAGED_WAVEFORM`.
+            Capture representation. Supported values are `AVERAGED_WAVEFORM`,
+            `AVERAGED_VALUE`, and `VALUES_PER_ITER`.
         parallel : bool, optional
             Whether QuEL-3 per-instrument execution phases run concurrently.
 
         Returns
         -------
         Quel3ResonatorSpectroscopyResult
-            Frequencies, captures, IQ values, and raw results.
+            Frequencies, mode-dependent captures, IQ values, and raw results.
 
         Notes
         -----
@@ -447,14 +449,16 @@ class Quel3BackendController(BackendController):
         max_points_per_batch : int, optional
             Maximum frequency points packed into one payload.
         capture_mode : Quel3CaptureMode, optional
-            Capture representation. The supported value is `AVERAGED_WAVEFORM`.
+            Capture representation. Supported values are `AVERAGED_WAVEFORM`,
+            `AVERAGED_VALUE`, and `VALUES_PER_ITER`.
         parallel : bool, optional
             Whether QuEL-3 per-instrument execution phases run concurrently.
 
         Returns
         -------
         Quel3QubitSpectroscopyResult
-            Drive frequencies, captures, IQ values, and raw results.
+            Drive frequencies, mode-dependent captures, IQ values, and raw
+            results.
 
         Notes
         -----
