@@ -817,3 +817,119 @@ def test_qubit_scan_redeploys_each_control_frequency_group() -> None:
     assert len(result.captures) == 4
     assert result.iq.shape == (4,)
     assert len(result.backend_results) == 3
+
+
+def test_instrument_pool_warning_threshold_is_strict() -> None:
+    """A 20-instrument spectroscopy pool should not emit a warning."""
+    execution_manager = _RecordingExecutionManager()
+    configuration_manager = _RecordingConfigurationManager()
+    manager = _manager(execution_manager, configuration_manager)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        asyncio.run(
+            manager.scan_resonator_frequencies_async(
+                target="R00",
+                frequency_range=np.linspace(6.0, 6.1, 20),
+                readout_amplitude=0.25,
+                readout_duration=3.2,
+                capture_delay=0.0,
+                capture_length=3.2,
+                point_interval=3.2,
+                n_shots=1,
+                shot_interval=0.0,
+                max_points_per_batch=20,
+                capture_mode=Quel3CaptureMode.VALUES_PER_ITER,
+            )
+        )
+
+    assert len(configuration_manager.calls[0]["requests"]) == 20
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"frequency_range": []}, "frequency_range must not be empty"),
+        ({"readout_amplitude": 1.1}, "readout_amplitude"),
+        ({"readout_duration": 1.0}, "sampling grid"),
+        ({"point_interval": 10.0}, "occupied length"),
+        ({"n_shots": 0}, "n_shots"),
+        ({"max_points_per_batch": 0}, "max_points_per_batch"),
+        ({"capture_mode": Quel3CaptureMode.RAW_WAVEFORMS}, "capture_mode"),
+        ({"capture_mode": Quel3CaptureMode.UNSPECIFIED}, "capture_mode"),
+    ],
+)
+def test_resonator_scan_rejects_invalid_settings(
+    overrides: dict[str, object],
+    message: str,
+) -> None:
+    """Invalid resonator settings should fail before backend execution."""
+    execution_manager = _RecordingExecutionManager()
+    manager = _manager(execution_manager)
+    kwargs: dict[str, object] = {
+        "target": "R00",
+        "frequency_range": [6.0],
+        "readout_amplitude": 0.25,
+        "readout_duration": 16.0,
+        "capture_delay": 8.0,
+        "capture_length": 8.0,
+        "point_interval": 16.0,
+        "n_shots": 1,
+        "shot_interval": 0.0,
+        "max_points_per_batch": 200,
+    }
+    kwargs.update(overrides)
+
+    with pytest.raises(ValueError, match=message):
+        asyncio.run(
+            manager.scan_resonator_frequencies_async(**kwargs)  # type: ignore[arg-type]
+        )
+
+    assert execution_manager.calls == []
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        (
+            {"readout_target": "Q00"},
+            "ports must be different",
+        ),
+        ({"control_amplitude": -1.1}, "control_amplitude"),
+        ({"control_duration": 1.0}, "control sampling grid"),
+        ({"control_to_readout_gap": -1.0}, "control_to_readout_gap"),
+        ({"point_interval": 9.0}, "occupied length"),
+    ],
+)
+def test_qubit_scan_rejects_invalid_settings(
+    overrides: dict[str, object],
+    message: str,
+) -> None:
+    """Invalid qubit settings should fail before backend execution."""
+    execution_manager = _RecordingExecutionManager()
+    manager = _manager(execution_manager)
+    kwargs: dict[str, object] = {
+        "target": "Q00",
+        "readout_target": "R00",
+        "frequency_range": [4.0],
+        "readout_frequency": 6.2,
+        "control_amplitude": 0.2,
+        "control_duration": 4.0,
+        "readout_amplitude": 0.25,
+        "readout_duration": 3.2,
+        "control_to_readout_gap": 2.0,
+        "capture_delay": 1.0,
+        "capture_length": 2.4,
+        "point_interval": 10.0,
+        "n_shots": 1,
+        "shot_interval": 0.0,
+        "max_points_per_batch": 200,
+    }
+    kwargs.update(overrides)
+
+    with pytest.raises(ValueError, match=message):
+        asyncio.run(
+            manager.scan_qubit_frequencies_async(**kwargs)  # type: ignore[arg-type]
+        )
+
+    assert execution_manager.calls == []
