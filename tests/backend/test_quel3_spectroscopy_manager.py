@@ -499,3 +499,321 @@ def test_resonator_scan_redeploys_each_frequency_group() -> None:
     assert len(result.captures) == 4
     assert result.iq.shape == (4,)
     assert len(result.backend_results) == 3
+
+
+def test_qubit_averaged_waveform_uses_detuned_packed_control() -> None:
+    """Averaged-waveform qubit scans should detune one packed control instrument."""
+    execution_manager = _RecordingExecutionManager()
+    configuration_manager = _RecordingConfigurationManager()
+    manager = _manager(execution_manager, configuration_manager)
+    frequencies = np.array([4.0, 4.1])
+
+    result = asyncio.run(
+        manager.scan_qubit_frequencies_async(
+            target="Q00",
+            readout_target="R00",
+            frequency_range=frequencies,
+            readout_frequency=6.2,
+            control_amplitude=0.2,
+            control_duration=1.6,
+            readout_amplitude=0.25,
+            readout_duration=1.6,
+            control_to_readout_gap=0.0,
+            capture_delay=0.0,
+            capture_length=1.6,
+            point_interval=3.2,
+            n_shots=1,
+            shot_interval=0.0,
+        )
+    )
+
+    assert len(configuration_manager.calls) == 1
+    control_request, readout_request = configuration_manager.calls[0]["requests"]
+    group_center = frequencies.mean()
+    assert control_request.frequency_range_min_hz == pytest.approx(
+        (group_center - MAX_QUBIT_SPECTROSCOPY_SPAN_GHZ / 2) * 1e9
+    )
+    assert control_request.frequency_range_max_hz == pytest.approx(
+        (group_center + MAX_QUBIT_SPECTROSCOPY_SPAN_GHZ / 2) * 1e9
+    )
+    assert readout_request.frequency_range_min_hz == pytest.approx(
+        (6.2 - MAX_RESONATOR_SPECTROSCOPY_SPAN_GHZ / 2) * 1e9
+    )
+    assert readout_request.frequency_range_max_hz == pytest.approx(
+        (6.2 + MAX_RESONATOR_SPECTROSCOPY_SPAN_GHZ / 2) * 1e9
+    )
+    call = execution_manager.calls[0]
+    assert call["method"] == "execute_batch_async"
+    (request,) = call["requests"]
+    control_timeline = request.payload.fixed_timelines["unit-a:qubit"]
+    assert len(control_timeline.events) == 2
+    assert control_timeline.frequency_hz == pytest.approx(frequencies.mean() * 1e9)
+    first_waveform = request.payload.waveform_library[
+        control_timeline.events[0].waveform_name
+    ].iq_array
+    detuning = frequencies[0] - frequencies.mean()
+    expected_control = 0.2 * np.exp(2j * np.pi * detuning * np.arange(4) * 0.4)
+    np.testing.assert_allclose(first_waveform, expected_control)
+    np.testing.assert_allclose(result.captures[0], np.ones(4))
+    assert result.sampling_period_ns == pytest.approx(0.8)
+
+
+def test_qubit_averaged_waveform_avoids_large_instrument_pool() -> None:
+    """Averaged-waveform qubit batches should reuse one control instrument."""
+    execution_manager = _RecordingExecutionManager()
+    configuration_manager = _RecordingConfigurationManager()
+    manager = _manager(execution_manager, configuration_manager)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        asyncio.run(
+            manager.scan_qubit_frequencies_async(
+                target="Q00",
+                readout_target="R00",
+                frequency_range=np.linspace(4.0, 4.2, 201),
+                readout_frequency=6.2,
+                control_amplitude=0.2,
+                control_duration=1.6,
+                readout_amplitude=0.25,
+                readout_duration=1.6,
+                control_to_readout_gap=0.0,
+                capture_delay=0.0,
+                capture_length=1.6,
+                point_interval=3.2,
+                n_shots=1,
+                shot_interval=0.0,
+                max_points_per_batch=200,
+            )
+        )
+
+    assert len(configuration_manager.calls) == 1
+    assert len(configuration_manager.calls[0]["requests"]) == 2
+    assert len(execution_manager.calls) == 1
+    assert execution_manager.calls[0]["method"] == "execute_batch_async"
+    assert len(execution_manager.calls[0]["requests"]) == 2
+
+
+def test_qubit_scan_reuses_group_instruments_across_batches() -> None:
+    """A qubit group should deploy one batch-sized reusable control pool."""
+    execution_manager = _RecordingExecutionManager()
+    configuration_manager = _RecordingConfigurationManager()
+    manager = _manager(execution_manager, configuration_manager)
+    frequencies = np.linspace(4.0, 4.2, 201)
+
+    with pytest.warns(RuntimeWarning, match="200 spectroscopy instruments"):
+        result = asyncio.run(
+            manager.scan_qubit_frequencies_async(
+                target="Q00",
+                readout_target="R00",
+                frequency_range=frequencies,
+                readout_frequency=6.2,
+                control_amplitude=0.2,
+                control_duration=4.0,
+                readout_amplitude=0.25,
+                readout_duration=3.2,
+                control_to_readout_gap=2.0,
+                capture_delay=1.0,
+                capture_length=2.4,
+                point_interval=10.0,
+                n_shots=16,
+                shot_interval=100.0,
+                max_points_per_batch=200,
+                capture_mode=Quel3CaptureMode.AVERAGED_VALUE,
+                parallel=False,
+            )
+        )
+
+    assert isinstance(result, Quel3QubitSpectroscopyResult)
+    assert len(configuration_manager.calls) == 1
+    deploy_requests = configuration_manager.calls[0]["requests"]
+    assert len(deploy_requests) == 201
+    first_control_request = deploy_requests[0]
+    second_control_request = deploy_requests[1]
+    readout_request = deploy_requests[-1]
+    assert first_control_request.alias == "qubit"
+    assert first_control_request.target_labels == ("Q00",)
+    assert first_control_request.frequency_range_min_hz == pytest.approx(4.0e9)
+    assert first_control_request.frequency_range_max_hz == pytest.approx(4.2e9)
+    assert second_control_request.alias == "qubit-spectroscopy-1"
+    assert second_control_request.target_labels == ("Q00",)
+    assert second_control_request.frequency_range_min_hz == pytest.approx(4.0e9)
+    assert second_control_request.frequency_range_max_hz == pytest.approx(4.2e9)
+    assert readout_request.alias == "readout"
+    assert readout_request.frequency_range_min_hz == pytest.approx(6.2e9)
+    assert readout_request.frequency_range_max_hz == pytest.approx(6.2e9)
+
+    assert len(execution_manager.calls) == 2
+    payload = execution_manager.calls[0]["request"].payload
+    assert len(payload.fixed_timelines) == 201
+    assert len(payload.waveform_library) == 2
+    control_timeline = payload.fixed_timelines["unit-a:qubit"]
+    second_control_timeline = payload.fixed_timelines["unit-a:qubit-spectroscopy-1"]
+    readout_timeline = payload.fixed_timelines["unit-a:readout"]
+    assert len(control_timeline.events) == 1
+    assert control_timeline.capture_windows == ()
+    assert control_timeline.frequency_hz == pytest.approx(frequencies[0] * 1e9)
+    assert second_control_timeline.frequency_hz == pytest.approx(frequencies[1] * 1e9)
+    assert len(readout_timeline.events) == 200
+    assert len(readout_timeline.capture_windows) == 200
+    assert readout_timeline.frequency_hz == pytest.approx(6.2e9)
+    assert second_control_timeline.events[0].start_offset_ns == pytest.approx(10.0)
+    assert readout_timeline.events[0].start_offset_ns == pytest.approx(6.0)
+    assert readout_timeline.events[1].start_offset_ns == pytest.approx(16.0)
+    assert readout_timeline.capture_windows[0].start_offset_ns == pytest.approx(7.0)
+    assert payload.n_iterations == 16
+    assert payload.shot_interval_ns == pytest.approx(100.0)
+
+    second_payload = execution_manager.calls[1]["request"].payload
+    assert tuple(second_payload.fixed_timelines) == (
+        "unit-a:qubit",
+        "unit-a:readout",
+    )
+    assert second_payload.fixed_timelines["unit-a:qubit"].frequency_hz == pytest.approx(
+        frequencies[-1] * 1e9
+    )
+
+    first_control_event = control_timeline.events[0]
+    first_control_waveform = payload.waveform_library[
+        first_control_event.waveform_name
+    ].iq_array
+    np.testing.assert_allclose(
+        first_control_waveform,
+        np.full(10, 0.2 + 0.0j),
+        rtol=1e-12,
+        atol=1e-12,
+    )
+
+    readout_waveform_names = {event.waveform_name for event in readout_timeline.events}
+    assert len(readout_waveform_names) == 1
+    np.testing.assert_allclose(result.frequency_range, frequencies)
+    np.testing.assert_allclose(result.captures[0], np.array([2.0 + 1.0j]))
+    np.testing.assert_allclose(result.iq, np.full(201, 2.0 + 1.0j))
+    assert result.readout_frequency == pytest.approx(6.2)
+    assert result.sampling_period_ns is None
+    assert len(result.backend_results) == 2
+
+
+def test_qubit_scan_uses_each_frequency_as_its_control_carrier() -> None:
+    """Each qubit frequency should be the carrier of its dedicated instrument."""
+    execution_manager = _RecordingExecutionManager()
+    manager = _manager(execution_manager)
+    frequencies = np.array([4.0, 4.1, 4.4])
+
+    asyncio.run(
+        manager.scan_qubit_frequencies_async(
+            target="Q00",
+            readout_target="R00",
+            frequency_range=frequencies,
+            readout_frequency=6.2,
+            control_amplitude=0.2,
+            control_duration=1.6,
+            readout_amplitude=0.25,
+            readout_duration=1.6,
+            control_to_readout_gap=0.0,
+            capture_delay=0.0,
+            capture_length=1.6,
+            point_interval=3.2,
+            n_shots=1,
+            shot_interval=0.0,
+            max_points_per_batch=2,
+            capture_mode=Quel3CaptureMode.AVERAGED_VALUE,
+        )
+    )
+
+    first_payload = execution_manager.calls[0]["request"].payload
+    second_payload = execution_manager.calls[1]["request"].payload
+    first_control = first_payload.fixed_timelines["unit-a:qubit"]
+    second_control = first_payload.fixed_timelines["unit-a:qubit-spectroscopy-1"]
+    third_control = second_payload.fixed_timelines["unit-a:qubit"]
+    assert first_control.frequency_hz == pytest.approx(4.0e9)
+    assert second_control.frequency_hz == pytest.approx(4.1e9)
+    assert third_control.frequency_hz == pytest.approx(4.4e9)
+
+
+def test_qubit_scan_returns_values_per_iteration() -> None:
+    """Values-per-iteration qubit scans should preserve every shot value."""
+    execution_manager = _RecordingExecutionManager()
+    manager = _manager(execution_manager)
+    frequencies = np.array([4.0, 4.1])
+
+    result = asyncio.run(
+        manager.scan_qubit_frequencies_async(
+            target="Q00",
+            readout_target="R00",
+            frequency_range=frequencies,
+            readout_frequency=6.2,
+            control_amplitude=0.2,
+            control_duration=1.6,
+            readout_amplitude=0.25,
+            readout_duration=1.6,
+            control_to_readout_gap=0.0,
+            capture_delay=0.0,
+            capture_length=1.6,
+            point_interval=3.2,
+            n_shots=3,
+            shot_interval=0.0,
+            capture_mode=Quel3CaptureMode.VALUES_PER_ITER,
+        )
+    )
+
+    payload = execution_manager.calls[0]["request"].payload
+    assert payload.capture_mode is Quel3CaptureMode.VALUES_PER_ITER
+    assert len(result.captures) == 2
+    np.testing.assert_allclose(result.captures[0], np.array([1.0, 2.0, 3.0]))
+    np.testing.assert_allclose(result.iq, np.array([[1.0, 2.0, 3.0]] * 2))
+    assert result.capture_mode is Quel3CaptureMode.VALUES_PER_ITER
+    assert result.sampling_period_ns is None
+
+
+def test_qubit_scan_redeploys_each_control_frequency_group() -> None:
+    """A qubit scan should redeploy only when the control span changes."""
+    events: list[str] = []
+    execution_manager = _RecordingExecutionManager(events)
+    configuration_manager = _RecordingConfigurationManager(events)
+    manager = _manager(execution_manager, configuration_manager)
+    frequencies = np.array([3.0, 3.8, 4.6, 5.4])
+
+    result = asyncio.run(
+        manager.scan_qubit_frequencies_async(
+            target="Q00",
+            readout_target="R00",
+            frequency_range=frequencies,
+            readout_frequency=6.2,
+            control_amplitude=0.2,
+            control_duration=1.6,
+            readout_amplitude=0.25,
+            readout_duration=1.6,
+            control_to_readout_gap=0.0,
+            capture_delay=0.0,
+            capture_length=1.6,
+            point_interval=3.2,
+            n_shots=1,
+            shot_interval=0.0,
+            max_points_per_batch=2,
+            capture_mode=Quel3CaptureMode.AVERAGED_VALUE,
+            parallel=False,
+        )
+    )
+
+    assert len(configuration_manager.calls) == 2
+    assert [len(call["requests"]) for call in configuration_manager.calls] == [3, 2]
+    for call, frequency_group in zip(
+        configuration_manager.calls,
+        (frequencies[:3], frequencies[3:]),
+        strict=True,
+    ):
+        *control_requests, readout_request = call["requests"]
+        assert [request.frequency_range_min_hz for request in control_requests] == (
+            pytest.approx(np.full(len(control_requests), np.min(frequency_group) * 1e9))
+        )
+        assert [request.frequency_range_max_hz for request in control_requests] == (
+            pytest.approx(np.full(len(control_requests), np.max(frequency_group) * 1e9))
+        )
+        assert readout_request.frequency_range_min_hz == pytest.approx(6.2e9)
+        assert readout_request.frequency_range_max_hz == pytest.approx(6.2e9)
+    assert events == ["deploy", "execute", "execute", "deploy", "execute"]
+    assert len(execution_manager.calls) == 3
+    np.testing.assert_allclose(result.frequency_range, frequencies)
+    assert len(result.captures) == 4
+    assert result.iq.shape == (4,)
+    assert len(result.backend_results) == 3
