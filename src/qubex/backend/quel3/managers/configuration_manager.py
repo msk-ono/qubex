@@ -162,6 +162,51 @@ class Quel3ConfigurationManager:
         """Return last deployed box-and-target to runtime-alias mapping."""
         return dict(self._target_alias_map)
 
+    def resolve_target_instrument(
+        self,
+        target: str,
+    ) -> tuple[str, str, InstrumentInfoProtocol]:
+        """Resolve a logical target or runtime alias from deployment state."""
+        normalized_target = target.strip()
+        if not normalized_target:
+            raise ValueError("Instrument target must not be empty.")
+        matches = {
+            (box_id, target_label, runtime_alias)
+            for (box_id, target_label), runtime_alias in self._target_alias_map.items()
+            if (
+                runtime_alias == normalized_target
+                if ":" in normalized_target
+                else target_label == normalized_target
+            )
+        }
+        if not matches:
+            raise ValueError(
+                "Instrument target is not mapped to a deployed QuEL-3 instrument: "
+                f"`{normalized_target}`."
+            )
+        if len(matches) > 1:
+            raise ValueError(
+                "Instrument target maps to multiple deployed instruments; pass a "
+                f"unit-qualified runtime alias instead: `{normalized_target}`."
+            )
+        box_id, target_label, runtime_alias = matches.pop()
+        matching_infos = [
+            instrument_info
+            for instrument_infos in self._last_deployed_instrument_infos.values()
+            for instrument_info in instrument_infos
+            if self._runtime_alias_from_instrument_info(
+                instrument_info=instrument_info,
+                fallback_alias=str(instrument_info.definition.alias),
+            )
+            == runtime_alias
+        ]
+        if len(matching_infos) != 1:
+            raise ValueError(
+                "Instrument target must resolve to exactly one cached instrument: "
+                f"`{normalized_target}`."
+            )
+        return box_id, target_label, matching_infos[0]
+
     def deploy_instruments(
         self,
         *,

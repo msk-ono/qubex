@@ -180,6 +180,62 @@ def test_deploy_instruments_calls_session_api(
     assert definition.alias in deployed
 
 
+@pytest.mark.parametrize("target", ["R00", "unit-a:R00"])
+def test_resolve_target_instrument_uses_cached_deployment(target: str) -> None:
+    """A logical target or runtime alias should resolve from deployment state."""
+    manager = Quel3ConfigurationManager()
+    manager.sync_backend_settings_to_cache(
+        backend_settings={
+            "BOX1": {
+                "instruments": {
+                    "R00": {
+                        "resource_id": "instrument-0",
+                        "port_id": "unit-a:trx_p00p01",
+                        "role": "TRANSCEIVER",
+                    }
+                }
+            }
+        }
+    )
+
+    box_id, target_label, instrument_info = manager.resolve_target_instrument(target)
+
+    assert box_id == "BOX1"
+    assert target_label == "R00"
+    assert instrument_info.port_id == "unit-a:trx_p00p01"
+    assert instrument_info.definition.alias == "R00"
+
+
+def test_resolve_target_instrument_rejects_ambiguous_logical_target() -> None:
+    """An ambiguous logical target should require a unit-qualified alias."""
+    manager = Quel3ConfigurationManager()
+    manager.sync_backend_settings_to_cache(
+        backend_settings={
+            "BOX1": {
+                "instruments": {
+                    "R00": {
+                        "resource_id": "instrument-a",
+                        "port_id": "unit-a:trx_p00p01",
+                        "role": "TRANSCEIVER",
+                    }
+                }
+            },
+            "BOX2": {
+                "instruments": {
+                    "R00": {
+                        "resource_id": "instrument-b",
+                        "port_id": "unit-b:trx_p00p01",
+                        "role": "TRANSCEIVER",
+                    }
+                }
+            },
+        }
+    )
+
+    with pytest.raises(ValueError, match="multiple deployed instruments"):
+        manager.resolve_target_instrument("R00")
+
+
 def test_deploy_instruments_recreates_session_after_transient_request_failure(
     caplog: pytest.LogCaptureFixture,
     monkeypatch: pytest.MonkeyPatch,
