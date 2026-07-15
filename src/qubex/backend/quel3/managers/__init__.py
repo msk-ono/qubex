@@ -6,6 +6,7 @@ from .execution_manager import Quel3ExecutionManager
 from .hardware_state_reader import Quel3HardwareStateReader
 from .runtime_config import Quel3RuntimeConfig
 from .session_manager import Quel3SessionManager
+from .spectroscopy_manager import Quel3SpectroscopyManager
 
 __all__ = [
     "Quel3ConfigurationManager",
@@ -14,4 +15,5 @@ __all__ = [
     "Quel3HardwareStateReader",
     "Quel3RuntimeConfig",
     "Quel3SessionManager",
+    "Quel3SpectroscopyManager",
 ]
