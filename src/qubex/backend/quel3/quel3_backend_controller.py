@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
+import numpy as np
+import numpy.typing as npt
 from rich.console import Console
 
 from qubex.backend.backend_controller import (
@@ -27,9 +29,21 @@ from .managers import (
     Quel3HardwareStateReader,
     Quel3RuntimeConfig,
     Quel3SessionManager,
+    Quel3SpectroscopyManager,
 )
-from .models import InstrumentDeployRequest, Quel3HardwareState, Quel3HardwareStateView
-from .quel3_backend_constants import CAPTURE_DECIMATION_FACTOR, SAMPLING_PERIOD_NS
+from .models import (
+    InstrumentDeployRequest,
+    Quel3CaptureMode,
+    Quel3HardwareState,
+    Quel3HardwareStateView,
+    Quel3QubitSpectroscopyResult,
+    Quel3ResonatorSpectroscopyResult,
+)
+from .quel3_backend_constants import (
+    CAPTURE_DECIMATION_FACTOR,
+    READOUT_SAMPLING_PERIOD_NS,
+    SAMPLING_PERIOD_NS,
+)
 
 
 class Quel3BackendController(BackendController):
@@ -56,6 +70,7 @@ class Quel3BackendController(BackendController):
         session_manager: Quel3SessionManager | None = None,
         configuration_manager: Quel3ConfigurationManager | None = None,
         execution_manager: Quel3ExecutionManager | None = None,
+        spectroscopy_manager: Quel3SpectroscopyManager | None = None,
         hardware_state_reader: Quel3HardwareStateReader | None = None,
     ) -> None:
         """
@@ -75,6 +90,8 @@ class Quel3BackendController(BackendController):
             Injected configuration manager for testing or customization.
         execution_manager : Quel3ExecutionManager | None, optional
             Injected execution manager for testing or customization.
+        spectroscopy_manager : Quel3SpectroscopyManager | None, optional
+            Injected packed spectroscopy manager for testing or customization.
         hardware_state_reader : Quel3HardwareStateReader | None, optional
             Injected hardware-state reader for testing or customization.
         """
@@ -120,6 +137,16 @@ class Quel3BackendController(BackendController):
                 sampling_period_ns=self._sampling_period_ns,
                 capture_decimation_factor=self.CAPTURE_DECIMATION_FACTOR,
                 session_manager=self._session_manager,
+            )
+        )
+        self._spectroscopy_manager = (
+            spectroscopy_manager
+            if spectroscopy_manager is not None
+            else Quel3SpectroscopyManager(
+                execution_manager=self._execution_manager,
+                configuration_manager=self._configuration_manager,
+                control_sampling_period_ns=SAMPLING_PERIOD_NS,
+                readout_sampling_period_ns=READOUT_SAMPLING_PERIOD_NS,
             )
         )
         self._hardware_state_reader = (
@@ -196,6 +223,11 @@ class Quel3BackendController(BackendController):
         return self._execution_manager
 
     @property
+    def spectroscopy_manager(self) -> Quel3SpectroscopyManager:
+        """Return backend-side QuEL-3 spectroscopy manager."""
+        return self._spectroscopy_manager
+
+    @property
     def hardware_state_reader(self) -> Quel3HardwareStateReader:
         """Return backend-side QuEL-3 hardware-state reader."""
         return self._hardware_state_reader
@@ -238,6 +270,266 @@ class Quel3BackendController(BackendController):
         """Deploy QuEL-3 instruments for the provided requests."""
         return self._configuration_manager.deploy_instruments(
             requests=requests,
+            parallel=parallel,
+        )
+
+    def scan_resonator_frequencies(
+        self,
+        target: str,
+        *,
+        frequency_range: Sequence[float] | npt.NDArray[np.float64],
+        readout_amplitude: float,
+        readout_duration: float,
+        capture_delay: float,
+        capture_length: float,
+        point_interval: float,
+        n_shots: int,
+        shot_interval: float,
+        max_points_per_batch: int = 200,
+        capture_mode: Quel3CaptureMode = Quel3CaptureMode.AVERAGED_WAVEFORM,
+        parallel: bool = True,
+    ) -> Quel3ResonatorSpectroscopyResult:
+        """
+        Scan resonator frequencies with packed QuEL-3 timelines.
+
+        Parameters
+        ----------
+        target : str
+            Logical deployed target or unit-qualified instrument alias.
+        frequency_range : Sequence[float] | NDArray[np.float64]
+            Sweep frequencies in GHz. The manager partitions consecutive points
+            into spans of at most 0.9 GHz and redeploys an exact 0.9 GHz profile
+            for each span.
+        readout_amplitude : float
+            Rectangular readout amplitude in [-1, 1].
+        readout_duration : float
+            Readout waveform duration in ns.
+        capture_delay : float
+            Capture start delay from each readout point in ns.
+        capture_length : float
+            Capture window length in ns.
+        point_interval : float
+            Start-to-start interval between packed frequency points in ns.
+        n_shots : int
+            Number of repetitions of each packed timeline.
+        shot_interval : float
+            Additional interval after each packed timeline in ns.
+        max_points_per_batch : int, optional
+            Maximum frequency points packed into one waveform payload.
+        capture_mode : Quel3CaptureMode, optional
+            Capture representation. The supported value is `AVERAGED_WAVEFORM`.
+        parallel : bool, optional
+            Whether QuEL-3 per-instrument execution phases run concurrently.
+
+        Returns
+        -------
+        Quel3ResonatorSpectroscopyResult
+            Frequencies, captures, IQ values, and raw results.
+
+        Notes
+        -----
+        The target port is redeployed with `append=False` before each frequency
+        span is executed. Existing instruments on that port are removed and are
+        not restored.
+        """
+        return self._spectroscopy_manager.scan_resonator_frequencies(
+            target=target,
+            frequency_range=frequency_range,
+            readout_amplitude=readout_amplitude,
+            readout_duration=readout_duration,
+            capture_delay=capture_delay,
+            capture_length=capture_length,
+            point_interval=point_interval,
+            n_shots=n_shots,
+            shot_interval=shot_interval,
+            max_points_per_batch=max_points_per_batch,
+            capture_mode=capture_mode,
+            parallel=parallel,
+        )
+
+    async def scan_resonator_frequencies_async(
+        self,
+        target: str,
+        *,
+        frequency_range: Sequence[float] | npt.NDArray[np.float64],
+        readout_amplitude: float,
+        readout_duration: float,
+        capture_delay: float,
+        capture_length: float,
+        point_interval: float,
+        n_shots: int,
+        shot_interval: float,
+        max_points_per_batch: int = 200,
+        capture_mode: Quel3CaptureMode = Quel3CaptureMode.AVERAGED_WAVEFORM,
+        parallel: bool = True,
+    ) -> Quel3ResonatorSpectroscopyResult:
+        """
+        Scan resonator frequencies asynchronously with packed timelines.
+
+        Notes
+        -----
+        Consecutive frequencies are partitioned into spans of at most 0.9 GHz.
+        The target port is redeployed with `append=False` before each span is
+        executed. Existing instruments are removed and are not restored.
+        """
+        return await self._spectroscopy_manager.scan_resonator_frequencies_async(
+            target=target,
+            frequency_range=frequency_range,
+            readout_amplitude=readout_amplitude,
+            readout_duration=readout_duration,
+            capture_delay=capture_delay,
+            capture_length=capture_length,
+            point_interval=point_interval,
+            n_shots=n_shots,
+            shot_interval=shot_interval,
+            max_points_per_batch=max_points_per_batch,
+            capture_mode=capture_mode,
+            parallel=parallel,
+        )
+
+    def scan_qubit_frequencies(
+        self,
+        target: str,
+        *,
+        readout_target: str,
+        frequency_range: Sequence[float] | npt.NDArray[np.float64],
+        readout_frequency: float,
+        control_amplitude: float,
+        control_duration: float,
+        readout_amplitude: float,
+        readout_duration: float,
+        control_to_readout_gap: float,
+        capture_delay: float,
+        capture_length: float,
+        point_interval: float,
+        n_shots: int,
+        shot_interval: float,
+        max_points_per_batch: int = 200,
+        capture_mode: Quel3CaptureMode = Quel3CaptureMode.AVERAGED_WAVEFORM,
+        parallel: bool = True,
+    ) -> Quel3QubitSpectroscopyResult:
+        """
+        Scan qubit frequencies with packed control and readout timelines.
+
+        Parameters
+        ----------
+        target : str
+            Logical control target or unit-qualified instrument alias.
+        readout_target : str
+            Logical readout target or unit-qualified instrument alias.
+        frequency_range : Sequence[float] | NDArray[np.float64]
+            Qubit drive frequencies in GHz. The manager partitions consecutive
+            points into spans of at most 1.8 GHz and redeploys an exact 1.8 GHz
+            control profile for each span.
+        readout_frequency : float
+            Fixed readout carrier frequency in GHz. Readout deployment uses an
+            exact 0.9 GHz profile centered on this frequency.
+        control_amplitude : float
+            Rectangular control amplitude in [-1, 1].
+        control_duration : float
+            Control waveform duration in ns.
+        readout_amplitude : float
+            Rectangular readout amplitude in [-1, 1].
+        readout_duration : float
+            Readout waveform duration in ns.
+        control_to_readout_gap : float
+            Gap from control pulse end to readout pulse start in ns.
+        capture_delay : float
+            Capture start delay from readout pulse start in ns.
+        capture_length : float
+            Capture window length in ns.
+        point_interval : float
+            Start-to-start interval between packed frequency points in ns.
+        n_shots : int
+            Number of repetitions of each packed timeline.
+        shot_interval : float
+            Additional interval after each packed timeline in ns.
+        max_points_per_batch : int, optional
+            Maximum frequency points packed into one payload.
+        capture_mode : Quel3CaptureMode, optional
+            Capture representation. The supported value is `AVERAGED_WAVEFORM`.
+        parallel : bool, optional
+            Whether QuEL-3 per-instrument execution phases run concurrently.
+
+        Returns
+        -------
+        Quel3QubitSpectroscopyResult
+            Drive frequencies, captures, IQ values, and raw results.
+
+        Notes
+        -----
+        The control and readout ports are each redeployed with `append=False`
+        before every control-frequency span is executed. Existing instruments
+        are removed and are not restored.
+        """
+        return self._spectroscopy_manager.scan_qubit_frequencies(
+            target=target,
+            readout_target=readout_target,
+            frequency_range=frequency_range,
+            readout_frequency=readout_frequency,
+            control_amplitude=control_amplitude,
+            control_duration=control_duration,
+            readout_amplitude=readout_amplitude,
+            readout_duration=readout_duration,
+            control_to_readout_gap=control_to_readout_gap,
+            capture_delay=capture_delay,
+            capture_length=capture_length,
+            point_interval=point_interval,
+            n_shots=n_shots,
+            shot_interval=shot_interval,
+            max_points_per_batch=max_points_per_batch,
+            capture_mode=capture_mode,
+            parallel=parallel,
+        )
+
+    async def scan_qubit_frequencies_async(
+        self,
+        target: str,
+        *,
+        readout_target: str,
+        frequency_range: Sequence[float] | npt.NDArray[np.float64],
+        readout_frequency: float,
+        control_amplitude: float,
+        control_duration: float,
+        readout_amplitude: float,
+        readout_duration: float,
+        control_to_readout_gap: float,
+        capture_delay: float,
+        capture_length: float,
+        point_interval: float,
+        n_shots: int,
+        shot_interval: float,
+        max_points_per_batch: int = 200,
+        capture_mode: Quel3CaptureMode = Quel3CaptureMode.AVERAGED_WAVEFORM,
+        parallel: bool = True,
+    ) -> Quel3QubitSpectroscopyResult:
+        """
+        Scan qubit frequencies asynchronously with packed timelines.
+
+        Notes
+        -----
+        Consecutive control frequencies are partitioned into spans of at most
+        1.8 GHz. The control and readout ports are each redeployed with
+        `append=False` before every span is executed. Existing instruments are
+        removed and are not restored.
+        """
+        return await self._spectroscopy_manager.scan_qubit_frequencies_async(
+            target=target,
+            readout_target=readout_target,
+            frequency_range=frequency_range,
+            readout_frequency=readout_frequency,
+            control_amplitude=control_amplitude,
+            control_duration=control_duration,
+            readout_amplitude=readout_amplitude,
+            readout_duration=readout_duration,
+            control_to_readout_gap=control_to_readout_gap,
+            capture_delay=capture_delay,
+            capture_length=capture_length,
+            point_interval=point_interval,
+            n_shots=n_shots,
+            shot_interval=shot_interval,
+            max_points_per_batch=max_points_per_batch,
+            capture_mode=capture_mode,
             parallel=parallel,
         )
 

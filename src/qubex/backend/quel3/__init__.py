@@ -6,6 +6,7 @@ from .managers import (
     Quel3ConfigurationManager,
     Quel3HardwareStateReader,
     Quel3RuntimeConfig,
+    Quel3SpectroscopyManager,
 )
 from .models import (
     InstrumentDeployRequest,
@@ -21,6 +22,8 @@ from .models import (
     Quel3InstrumentState,
     Quel3PortDiagnostic,
     Quel3PortState,
+    Quel3QubitSpectroscopyResult,
+    Quel3ResonatorSpectroscopyResult,
     Quel3UnitState,
     Quel3Waveform,
     Quel3WaveformEvent,
@@ -45,8 +48,11 @@ __all__ = [
     "Quel3InstrumentState",
     "Quel3PortDiagnostic",
     "Quel3PortState",
+    "Quel3QubitSpectroscopyResult",
+    "Quel3ResonatorSpectroscopyResult",
     "Quel3RuntimeConfig",
     "Quel3SequencerBuilder",
+    "Quel3SpectroscopyManager",
     "Quel3UnitState",
     "Quel3Waveform",
     "Quel3WaveformEvent",
