@@ -28,7 +28,10 @@ def test_system_manager_preview_configure_delegates_to_active_synchronizer(
 ) -> None:
     """Given active backend, SystemManager should delegate preview to its synchronizer."""
     manager = SystemManager.shared()
-    experiment_system = SimpleNamespace(hash=0)
+    experiment_system = SimpleNamespace(
+        hash=0,
+        get_boxes_for_qubits=lambda _qubits: [SimpleNamespace(id="A")],
+    )
     preview = ConfigurePreview(
         backend_kind=BACKEND_KIND_QUEL1,
         box_ids=("A",),
@@ -51,9 +54,10 @@ def test_system_manager_preview_configure_delegates_to_active_synchronizer(
         params_dir="params",
         targets_to_exclude=["Q00"],
         configuration_mode="ge-cr-cr",
-        box_ids=["A"],
+        box_ids=None,
         parallel=False,
         target_labels=["Q00"],
+        qubit_labels=["Q00"],
     )
 
     assert result is preview

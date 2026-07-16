@@ -205,6 +205,19 @@ def test_preview_configure_ignores_unspecified_fnco() -> None:
     assert preview.changes == ()
 
 
+def test_preview_configure_ignores_unspecified_port_fields() -> None:
+    """Given a planned port field is unspecified, preview should preserve hardware."""
+    preview = _preview(
+        experiment_system=_make_system(
+            box_type=BoxType.QUEL1SE_A,
+            lo_freq=None,
+        ),
+        backend_settings=_backend_settings(lo_freq=10_000_000_000),
+    )
+
+    assert preview.changes == ()
+
+
 def test_preview_configure_marks_missing_fetch_incomplete() -> None:
     """Given missing hardware fetch result, preview should be incomplete."""
     preview = _preview(

@@ -62,6 +62,7 @@ class _ContextStub:
         self._calls = calls
         self.configuration_mode: ConfigurationMode = "ge-cr-cr"
         self.box_ids = ["Q2A", "Q2B"]
+        self.qubit_labels = ["Q00"]
         self.targets = {"Q00": object(), "RQ00": object()}
         self.backend_controller = object()
         self.system_manager = system_manager
@@ -285,7 +286,7 @@ def test_preview_configure_uses_system_manager_without_push(monkeypatch) -> None
         experiment_context=cast(ExperimentContext, context),
     )
 
-    preview = service.preview_configure(box_ids="Q2A", exclude="Q00", mode=None)
+    preview = service.preview_configure(exclude="Q00", mode=None)
 
     assert preview is context.system_manager.configure_preview
     assert calls == [
@@ -298,8 +299,9 @@ def test_preview_configure_uses_system_manager_without_push(monkeypatch) -> None
                 "params_dir": "params-dir",
                 "targets_to_exclude": ["Q00"],
                 "configuration_mode": "ge-cr-cr",
-                "box_ids": ["Q2A"],
+                "box_ids": None,
                 "target_labels": ["Q00", "RQ00"],
+                "qubit_labels": ["Q00"],
             },
         )
     ]
@@ -340,6 +342,7 @@ def test_configure_dry_run_prints_preview_without_load_or_push(monkeypatch) -> N
                 "configuration_mode": "ge-cr-cr",
                 "box_ids": ["Q2A"],
                 "target_labels": ["Q00", "RQ00"],
+                "qubit_labels": ["Q00"],
             },
         ),
         ("preview.print_summary", {}),

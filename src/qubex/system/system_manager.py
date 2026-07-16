@@ -475,9 +475,10 @@ class SystemManager:
         params_dir: Path | str | None = None,
         targets_to_exclude: list[str] | None = None,
         configuration_mode: ConfigurationMode | None = None,
-        box_ids: Sequence[str],
+        box_ids: Sequence[str] | None,
         parallel: bool | None = None,
         target_labels: Sequence[str] | None = None,
+        qubit_labels: Sequence[str] | None = None,
     ) -> ConfigurePreview:
         """
         Preview device state changes that `configure()` would apply.
@@ -496,12 +497,15 @@ class SystemManager:
             Target labels to exclude from the previewed model.
         configuration_mode : ConfigurationMode | None, optional
             Configuration mode to preview.
-        box_ids : Sequence[str]
-            Box IDs to compare against current hardware settings.
+        box_ids : Sequence[str] | None
+            Box IDs to compare against current hardware settings. If `None`,
+            resolves boxes from the previewed system.
         parallel : bool | None, optional
             Whether to fetch per-box hardware settings in parallel.
         target_labels : Sequence[str] | None, optional
             Logical target labels to include in the previewed hardware plan.
+        qubit_labels : Sequence[str] | None, optional
+            Active qubit labels used to resolve default boxes.
 
         Returns
         -------
@@ -521,6 +525,13 @@ class SystemManager:
             targets_to_exclude=targets_to_exclude,
             configuration_mode=configuration_mode,
         )
+        if box_ids is None:
+            boxes = (
+                preview_experiment_system.boxes
+                if qubit_labels is None
+                else preview_experiment_system.get_boxes_for_qubits(qubit_labels)
+            )
+            box_ids = [box.id for box in boxes]
         system_synchronizer = self._resolve_preview_system_synchronizer(backend_kind)
         return system_synchronizer.preview_configure(
             experiment_system=preview_experiment_system,

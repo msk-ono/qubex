@@ -117,13 +117,7 @@ class Quel1ConfigurePreviewProvider(ConfigurePreviewProvider):
                 component=component,
                 field=field,
                 before=_normalize_value(config.get(field)),
-                after=_normalize_value(
-                    self._effective_generator_port_value(
-                        box=box,
-                        port=port,
-                        field=field,
-                    )
-                ),
+                after=planned_value,
                 unit="Hz" if field in FREQUENCY_FIELDS else None,
                 is_frequency=field in FREQUENCY_FIELDS,
             )
@@ -135,6 +129,16 @@ class Quel1ConfigurePreviewProvider(ConfigurePreviewProvider):
                 "fullscale_current",
                 "rfswitch",
             )
+            if (
+                planned_value := _normalize_value(
+                    self._effective_generator_port_value(
+                        box=box,
+                        port=port,
+                        field=field,
+                    )
+                )
+            )
+            is not None
         )
 
         channels_config = config.get("channels", {})
@@ -200,11 +204,13 @@ class Quel1ConfigurePreviewProvider(ConfigurePreviewProvider):
                 component=component,
                 field=field,
                 before=_normalize_value(config.get(field)),
-                after=_normalize_value(getattr(port, field, None)),
+                after=planned_value,
                 unit="Hz" if field in FREQUENCY_FIELDS else None,
                 is_frequency=field in FREQUENCY_FIELDS,
             )
             for field in ("lo_freq", "cnco_freq", "rfswitch")
+            if (planned_value := _normalize_value(getattr(port, field, None)))
+            is not None
         )
 
         runits_config = config.get("runits", {})

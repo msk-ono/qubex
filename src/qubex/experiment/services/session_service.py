@@ -204,7 +204,6 @@ class SessionService:
         if mode is None:
             mode = self.ctx.configuration_mode
 
-        resolved_box_ids = box_ids or self.ctx.box_ids
         return self.ctx.system_manager.preview_configure(
             chip_id=self.ctx.chip_id,
             system_id=self.ctx.config_loader.system_id,
@@ -212,8 +211,9 @@ class SessionService:
             params_dir=self.ctx.params_path,
             targets_to_exclude=exclude,
             configuration_mode=mode,
-            box_ids=resolved_box_ids,
+            box_ids=box_ids,
             target_labels=list(self.ctx.targets),
+            qubit_labels=self.ctx.qubit_labels,
         )
 
     def reset_awg_and_capunits(
