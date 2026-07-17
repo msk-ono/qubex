@@ -199,6 +199,8 @@ class SessionService:
         """Preview configuration changes without pushing them to hardware."""
         if isinstance(box_ids, str):
             box_ids = [box_ids]
+        if box_ids == []:
+            box_ids = None
         if isinstance(exclude, str):
             exclude = [exclude]
         if mode is None:
