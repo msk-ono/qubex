@@ -46,8 +46,9 @@ exp.connect()
 exp.configure()
 ```
 
-QuEL-1 または QuEL-3 で反映予定の差分を確認したい場合は、push する前に preview できます。
+QuEL-1 で反映予定の差分を確認したい場合は、push する前に preview できます。
 preview は比較のために現在の hardware settings を取得しますが、更新は push しません。
+QuEL-3 の configure preview は未実装です。
 
 ```python
 preview = exp.preview_configure()

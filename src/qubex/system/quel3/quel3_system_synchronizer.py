@@ -5,15 +5,12 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
-from .quel3_configure_preview import Quel3ConfigurePreviewProvider
 from .quel3_target_deploy_planner import Quel3TargetDeployPlanner
 
 if TYPE_CHECKING:
     from qubex.backend.quel3.quel3_backend_controller import Quel3BackendController
-    from qubex.system.configure_preview import ConfigurePreview
     from qubex.system.control_system import Box
     from qubex.system.experiment_system import ExperimentSystem
-    from qubex.typing import ConfigurationMode
 
 
 class Quel3SystemSynchronizer:
@@ -93,34 +90,6 @@ class Quel3SystemSynchronizer:
         return self._backend_controller.configuration_manager.fetch_backend_settings_from_hardware(
             unit_labels_by_box_id=unit_labels_by_box_id,
             parallel=parallel,
-        )
-
-    def preview_configure(
-        self,
-        *,
-        experiment_system: ExperimentSystem,
-        box_ids: Sequence[str],
-        mode: ConfigurationMode | None,
-        parallel: bool | None = None,
-        target_labels: Sequence[str] | None = None,
-    ) -> ConfigurePreview:
-        """Preview QuEL-3 instrument deployment changes for `configure()`."""
-        requests = self._deploy_planner.build_deploy_requests(
-            experiment_system=experiment_system,
-            box_ids=box_ids,
-            target_labels=target_labels,
-        )
-        backend_settings = self.fetch_backend_settings_from_hardware(
-            experiment_system=experiment_system,
-            box_ids=box_ids,
-            parallel=parallel,
-        )
-        return Quel3ConfigurePreviewProvider().build_preview(
-            experiment_system=experiment_system,
-            backend_settings=backend_settings,
-            box_ids=box_ids,
-            mode=mode,
-            requests=requests,
         )
 
     def sync_backend_settings_to_backend_controller(

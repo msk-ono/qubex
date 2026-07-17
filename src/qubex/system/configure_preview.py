@@ -155,6 +155,22 @@ class ConfigurePreviewProvider(Protocol):
         ...
 
 
+class ConfigurePreviewSynchronizer(Protocol):
+    """Synchronizer capability for backends that support configure previews."""
+
+    def preview_configure(
+        self,
+        *,
+        experiment_system: ExperimentSystem,
+        box_ids: Sequence[str],
+        mode: ConfigurationMode | None,
+        parallel: bool | None = None,
+        target_labels: Sequence[str] | None = None,
+    ) -> ConfigurePreview:
+        """Preview backend-specific hardware changes for `configure()`."""
+        ...
+
+
 def _format_value(value: object) -> str:
     if value is None:
         return ""

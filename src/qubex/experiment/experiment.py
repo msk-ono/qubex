@@ -831,7 +831,14 @@ class Experiment:
         exclude: str | list[str] | None = None,
         mode: ConfigurationMode | None = None,
     ) -> ConfigurePreview:
-        """Preview hardware settings that `configure()` would change."""
+        """
+        Preview QuEL-1 hardware settings that `configure()` would change.
+
+        Raises
+        ------
+        NotImplementedError
+            If the active backend is QuEL-3.
+        """
         return self.session_service.preview_configure(
             box_ids=box_ids,
             exclude=exclude,

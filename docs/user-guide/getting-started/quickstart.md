@@ -52,9 +52,9 @@ parameter settings to the instruments.
 exp.configure()
 ```
 
-Preview the planned QuEL-1 or QuEL-3 changes before pushing when you need to
-check what would change. The preview fetches current hardware settings for
-comparison, but it does not push updates.
+Preview the planned QuEL-1 changes before pushing when you need to check what
+would change. The preview fetches current hardware settings for comparison, but
+it does not push updates. Configure previews are not implemented for QuEL-3.
 
 ```python
 preview = exp.preview_configure()

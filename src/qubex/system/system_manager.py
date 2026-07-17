@@ -9,7 +9,7 @@ from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from rich.prompt import Confirm
 from typing_extensions import Self, deprecated
@@ -28,7 +28,7 @@ from qubex.constants import (
 from qubex.typing import ConfigurationMode
 
 from .config_loader import ConfigLoader
-from .configure_preview import ConfigurePreview
+from .configure_preview import ConfigurePreview, ConfigurePreviewSynchronizer
 from .control_system import Box
 from .experiment_system import ExperimentSystem
 from .quel1.quel1_system_synchronizer import Quel1SystemSynchronizer
@@ -487,6 +487,11 @@ class SystemManager:
         ConfigurePreview
             Structured summary of field-level changes.
 
+        Raises
+        ------
+        NotImplementedError
+            If the preview backend does not support configure previews.
+
         Notes
         -----
         This method fetches hardware state but does not mutate manager,
@@ -796,19 +801,24 @@ This operation will overwrite the existing backend settings. Do you want to cont
     def _resolve_preview_system_synchronizer(
         self,
         backend_kind: BackendKind,
-    ) -> SystemSynchronizer:
+    ) -> ConfigurePreviewSynchronizer:
         """Return active synchronizer when it matches the preview backend kind."""
-        if backend_kind != self._backend_kind:
+        active_backend_kind = self.backend_kind
+        if backend_kind != active_backend_kind:
             raise RuntimeError(
                 "Configure preview backend kind does not match the active session "
-                f"(preview={backend_kind!r}, active={self._backend_kind!r})."
+                f"(preview={backend_kind!r}, active={active_backend_kind!r})."
+            )
+        if backend_kind != BACKEND_KIND_QUEL1:
+            raise NotImplementedError(
+                f"Configure preview is not implemented for backend kind: {backend_kind}."
             )
         system_synchronizer = self._resolve_system_synchronizer()
         if system_synchronizer is None:
             raise NotImplementedError(
                 f"Configure preview is not implemented for backend kind: {backend_kind}."
             )
-        return system_synchronizer
+        return cast(ConfigurePreviewSynchronizer, system_synchronizer)
 
     def _sync_backend_settings_to_backend_controller(
         self,
