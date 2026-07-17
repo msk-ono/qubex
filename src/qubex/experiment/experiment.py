@@ -150,9 +150,10 @@ class Experiment:
         Type of the state classifier. Defaults to "gmm".
     configuration_mode : ConfigurationMode, optional
         Priority-ordered control layout. `"ge-ef-cr"` assigns channels to GE,
-        then EF, then CR. `"ge-cr-cr"` assigns GE, then two CR channels.
-        Ports with fewer channels keep the leftmost roles. Defaults to
-        `"ge-cr-cr"`.
+        then EF, then CR. `"ge-ef-fh"` assigns GE, then EF, then FH.
+        `"ge-cr-cr"` assigns GE, then two CR channels. Ports with fewer
+        channels keep the leftmost roles, except two-channel `"ge-ef-fh"`
+        ports share channel 1 between EF and FH. Defaults to `"ge-cr-cr"`.
 
     Examples
     --------
@@ -449,6 +450,11 @@ class Experiment:
         return self.ctx.ef_targets
 
     @property
+    def fh_targets(self) -> dict[str, Target]:
+        """Return available FH targets."""
+        return self.ctx.fh_targets
+
+    @property
     def cr_targets(self) -> dict[str, Target]:
         """Return available CR targets."""
         return self.ctx.cr_targets
@@ -705,6 +711,10 @@ class Experiment:
         """Return the control/target qubit pair for a CR label."""
         return self.ctx.cr_pair(cr_label)
 
+    def resolve_2q_qubits(self, target_label: str) -> tuple[str, str]:
+        """Return the qubits for a two-qubit target label."""
+        return self.ctx.resolve_2q_qubits(target_label)
+
     def get_rabi_param(
         self,
         target: str,
@@ -852,6 +862,8 @@ class Experiment:
         port_number: int,
         channel_number: int,
         qubit_label: str | None = None,
+        target_qubit_label: str | None = None,
+        metadata: dict[str, Any] | None = None,
         target_type: TargetType | None = None,
         update_backend_settings: bool | None = None,
         **deprecated_options: Any,
@@ -873,6 +885,8 @@ class Experiment:
             port_number=port_number,
             channel_number=channel_number,
             qubit_label=qubit_label,
+            target_qubit_label=target_qubit_label,
+            metadata=metadata,
             target_type=target_type,
             update_backend_settings=update_backend_settings,
         )
@@ -2728,6 +2742,7 @@ class Experiment:
             **deprecated_options,
         )
 
+    @deprecated('Use `measure(..., mode="single")` instead.')
     def measure_population(
         self,
         sequence: TargetMap[IQArray] | TargetMap[Waveform] | PulseSchedule,
@@ -2772,6 +2787,7 @@ class Experiment:
             **deprecated_options,
         )
 
+    @deprecated("Use `run_sweep_measurement(...)` instead.")
     def measure_population_dynamics(
         self,
         *,
@@ -4946,18 +4962,22 @@ class Experiment:
         frequency_width: float | None = None,
         readout_amplitude: float | None = None,
         electrical_delay: float | None = None,
+        objective: Literal["fidelity", "distance"] | None = None,
+        fidelity_ratio: float | None = None,
         n_shots: int | None = None,
         shot_interval: float | None = None,
         plot: bool | None = None,
         save_image: bool | None = None,
     ) -> Result:
-        """Find the readout frequency maximizing state separation."""
+        """Find the readout frequency maximizing state separation or fidelity."""
         return self.characterization_service.find_optimal_readout_frequency(
             target=target,
             df=df,
             frequency_width=frequency_width,
             readout_amplitude=readout_amplitude,
             electrical_delay=electrical_delay,
+            objective=objective,
+            fidelity_ratio=fidelity_ratio,
             shots=n_shots,
             interval=shot_interval,
             plot=plot,
