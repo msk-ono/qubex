@@ -2,14 +2,93 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from types import SimpleNamespace
-from typing import Any, cast
+from typing import Any, ClassVar, cast
 
 import pytest
 
+from qubex.backend.quel1.quel1_backend_controller import Quel1BackendController
+from qubex.backend.quel1.quel1_runtime_context import Quel1RuntimeContext
 from qubex.system import ConfigurePreview, ConfigureStateChange
 from qubex.system.control_system import BoxType, PortType
-from qubex.system.quel1 import Quel1ConfigurePreviewProvider
+from qubex.system.quel1.quel1_configure_preview import Quel1BoxPreviewContext
+from qubex.system.quel1.quel1_system_synchronizer import Quel1SystemSynchronizer
+
+
+class _HardwareQuel1Box:
+    snapshots_by_ip: ClassVar[dict[str, dict]] = {}
+    config_calls: ClassVar[list[str]] = []
+
+    def __init__(self, *, ipaddr_wss: str, ipaddr_sss: str, boxtype: str) -> None:
+        self._state = deepcopy(self.snapshots_by_ip[ipaddr_wss])
+        self.boxtype = boxtype
+        self.wss = SimpleNamespace(ipaddr_sss=ipaddr_sss)
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        ipaddr_wss: str,
+        ipaddr_sss: str,
+        boxtype: str,
+        **_: object,
+    ) -> _HardwareQuel1Box:
+        return cls(
+            ipaddr_wss=ipaddr_wss,
+            ipaddr_sss=ipaddr_sss,
+            boxtype=boxtype,
+        )
+
+    def reconnect(self, **_: object) -> dict[int, bool]:
+        return {}
+
+    def dump_box(self) -> dict:
+        return deepcopy(self._state)
+
+    def config_port(self, **_: object) -> None:
+        self.config_calls.append("port")
+
+    def config_channel(self, **_: object) -> None:
+        self.config_calls.append("channel")
+
+    def config_runit(self, **_: object) -> None:
+        self.config_calls.append("runit")
+
+
+Quel1Box = _HardwareQuel1Box
+
+
+class _SystemConfigDatabaseStub:
+    def __init__(self, *, box_type: BoxType) -> None:
+        self._box_settings = {
+            "A": SimpleNamespace(
+                ipaddr_wss="192.0.2.1",
+                ipaddr_sss="192.0.2.2",
+                ipaddr_css="192.0.2.3",
+                boxtype=box_type.value,
+            )
+        }
+        self.created_box_classes: list[type[object]] = []
+
+    def asdict(self) -> dict[str, object]:
+        return {"box_settings": self._box_settings}
+
+    def create_box(
+        self,
+        box_name: str,
+        reconnect: bool = True,
+    ) -> object:
+        del reconnect
+        setting = self._box_settings[box_name]
+        self.created_box_classes.append(Quel1Box)
+        return Quel1Box.create(
+            ipaddr_wss=setting.ipaddr_wss,
+            ipaddr_sss=setting.ipaddr_sss,
+            ipaddr_css=setting.ipaddr_css,
+            boxtype=setting.boxtype,
+            skip_init=False,
+        )
 
 
 class _ExperimentSystemStub:
@@ -142,12 +221,169 @@ def _preview(
     experiment_system: _ExperimentSystemStub,
     backend_settings: dict[str, dict],
 ) -> ConfigurePreview:
-    return Quel1ConfigurePreviewProvider().build_preview(
-        experiment_system=cast(Any, experiment_system),
+    backend_controller, _ = _make_backend_controller(
         backend_settings=backend_settings,
+        box_type=experiment_system.get_box("A").type,
+    )
+    synchronizer = Quel1SystemSynchronizer(backend_controller=backend_controller)
+    return synchronizer.preview_configure(
+        experiment_system=cast(Any, experiment_system),
         box_ids=["A"],
         mode="ge-cr-cr",
+        parallel=False,
     )
+
+
+def _make_backend_controller(
+    *,
+    backend_settings: dict[str, dict],
+    box_type: BoxType,
+    connected: bool = False,
+) -> tuple[Quel1BackendController, _SystemConfigDatabaseStub]:
+    database = _SystemConfigDatabaseStub(box_type=box_type)
+    _HardwareQuel1Box.snapshots_by_ip = {
+        "192.0.2.1": deepcopy(backend_settings.get("A", {}))
+    }
+    _HardwareQuel1Box.config_calls = []
+    driver = SimpleNamespace(
+        DEFAULT_SAMPLING_PERIOD=2.0,
+        Quel1Box=_HardwareQuel1Box,
+    )
+    qubecalib = SimpleNamespace(system_config_database=database)
+    runtime_context = Quel1RuntimeContext(
+        driver=cast(Any, driver),
+        qubecalib=cast(Any, qubecalib),
+    )
+    if connected:
+        hardware_box = _HardwareQuel1Box.create(
+            ipaddr_wss="192.0.2.1",
+            ipaddr_sss="192.0.2.2",
+            boxtype=box_type.value,
+        )
+        runtime_context.set_connected_state(
+            boxpool=cast(
+                Any,
+                SimpleNamespace(_boxes={"A": (hardware_box, object())}),
+            ),
+            quel1system=cast(Any, object()),
+            cap_resource_map={},
+            gen_resource_map={},
+        )
+    return Quel1BackendController(runtime_context=runtime_context), database
+
+
+def test_preview_configure_temporarily_replaces_quel1_box() -> None:
+    """Preview should configure a mock box and restore the real box class afterward."""
+    system = _make_system(lo_freq=11_000_000_000)
+    backend_settings = _backend_settings(lo_freq=10_000_000_000)
+    backend_controller, database = _make_backend_controller(
+        backend_settings=backend_settings,
+        box_type=BoxType.QUEL1SE_R8,
+    )
+    synchronizer = Quel1SystemSynchronizer(backend_controller=backend_controller)
+
+    preview = synchronizer.preview_configure(
+        experiment_system=cast(Any, system),
+        box_ids=["A"],
+        mode="ge-cr-cr",
+        parallel=False,
+    )
+
+    assert database.created_box_classes[0] is _HardwareQuel1Box
+    assert any(
+        box_class is not _HardwareQuel1Box
+        for box_class in database.created_box_classes[1:]
+    )
+    assert Quel1Box is _HardwareQuel1Box
+    assert _HardwareQuel1Box.config_calls == []
+    assert preview.changes[0].after == 11_000_000_000
+
+
+def test_preview_configure_uses_hardware_sync_orchestration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Preview should execute the same system-to-hardware orchestration as push."""
+    system = _make_system(lo_freq=11_000_000_000)
+    backend_controller, _ = _make_backend_controller(
+        backend_settings=_backend_settings(lo_freq=10_000_000_000),
+        box_type=BoxType.QUEL1SE_R8,
+    )
+    synchronizer = Quel1SystemSynchronizer(backend_controller=backend_controller)
+    sync_calls: list[tuple[list[str], bool | None, tuple[str, ...] | None]] = []
+    original_sync = synchronizer.sync_experiment_system_to_hardware
+
+    def _record_sync(**kwargs: Any) -> None:
+        sync_calls.append(
+            (
+                [box.id for box in kwargs["boxes"]],
+                kwargs["parallel"],
+                tuple(kwargs["target_labels"]),
+            )
+        )
+        original_sync(**kwargs)
+
+    monkeypatch.setattr(
+        synchronizer,
+        "sync_experiment_system_to_hardware",
+        _record_sync,
+    )
+
+    synchronizer.preview_configure(
+        experiment_system=cast(Any, system),
+        box_ids=["A"],
+        mode="ge-cr-cr",
+        parallel=False,
+        target_labels=["Q00"],
+    )
+
+    assert sync_calls == [(["A"], False, ("Q00",))]
+
+
+def test_preview_configure_restores_connected_boxpool() -> None:
+    """Preview should restore connected boxpool entries after mock configuration."""
+    system = _make_system(lo_freq=11_000_000_000)
+    backend_controller, _ = _make_backend_controller(
+        backend_settings=_backend_settings(lo_freq=10_000_000_000),
+        box_type=BoxType.QUEL1SE_R8,
+        connected=True,
+    )
+    boxpool = cast(Any, backend_controller.boxpool)
+    pooled_boxes = vars(boxpool)["_boxes"]
+    original_box = pooled_boxes["A"][0]
+    synchronizer = Quel1SystemSynchronizer(backend_controller=backend_controller)
+
+    preview = synchronizer.preview_configure(
+        experiment_system=cast(Any, system),
+        box_ids=["A"],
+        mode="ge-cr-cr",
+        parallel=False,
+    )
+
+    assert pooled_boxes["A"][0] is original_box
+    assert _HardwareQuel1Box.config_calls == []
+    assert preview.changes[0].after == 11_000_000_000
+
+
+def test_preview_context_restores_quel1_box_after_exception() -> None:
+    """Preview context should restore the real box class after an exception."""
+    backend_controller, _ = _make_backend_controller(
+        backend_settings=_backend_settings(),
+        box_type=BoxType.QUEL1SE_R8,
+    )
+    context = Quel1BoxPreviewContext(
+        backend_controller=backend_controller,
+        backend_settings=_backend_settings(),
+    )
+
+    def _raise_inside_context() -> None:
+        with context:
+            assert Quel1Box is not _HardwareQuel1Box
+            raise RuntimeError("stop preview")
+
+    with pytest.raises(RuntimeError, match="stop preview"):
+        _raise_inside_context()
+
+    assert Quel1Box is _HardwareQuel1Box
 
 
 def test_preview_configure_reports_no_changes() -> None:

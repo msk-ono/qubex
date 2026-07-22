@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol
 
@@ -138,21 +138,6 @@ class ConfigurePreview:
             if include_change:
                 row.append("")
             table.add_row(*row)
-
-
-class ConfigurePreviewProvider(Protocol):
-    """Backend-specific provider for `configure()` previews."""
-
-    def build_preview(
-        self,
-        *,
-        experiment_system: ExperimentSystem,
-        backend_settings: Mapping[str, dict],
-        box_ids: Sequence[str],
-        mode: ConfigurationMode | None,
-    ) -> ConfigurePreview:
-        """Build one configure preview from hardware and planned software state."""
-        ...
 
 
 class ConfigurePreviewSynchronizer(Protocol):
