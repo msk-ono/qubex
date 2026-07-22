@@ -18,7 +18,7 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True)
 class ConfigureStateChange:
-    """One field-level state comparison that `configure()` would evaluate."""
+    """One field comparison between current and post-`configure()` device state."""
 
     box_id: str
     component: str
@@ -36,7 +36,7 @@ class ConfigureStateChange:
 
 @dataclass(frozen=True)
 class ConfigurePreview:
-    """Structured preview of device state changes from `configure()`."""
+    """Structured preview of post-`configure()` device state changes."""
 
     backend_kind: BackendKind
     box_ids: tuple[str, ...]
