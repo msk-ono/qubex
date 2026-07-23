@@ -259,6 +259,8 @@ class Quel1BoxMock:
         value: object,
     ) -> None:
         """Apply one value to every port sharing its physical resource."""
+        # Shared LOs are approximated as one logical frequency; the preview does
+        # not model independent per-output divider ratios of the physical LMX.
         physical_value = _encode_resource_value(field=field, value=value)
         for affected_port in _resource_ports(
             boxtype=self.boxtype,
@@ -303,11 +305,15 @@ class Quel1BoxPreviewContext:
         *,
         backend_controller: Quel1BackendController,
         backend_settings: Mapping[str, dict],
+        box_types: Mapping[str, BoxType],
     ) -> None:
         """Initialize mock boxes from fetched hardware snapshots."""
         self._backend_controller = backend_controller
         self._database = backend_controller.qubecalib.system_config_database
-        self._boxes = self._create_mock_boxes(backend_settings)
+        self._boxes = self._create_mock_boxes(
+            backend_settings=backend_settings,
+            box_types=box_types,
+        )
         self._database_globals = self._resolve_database_globals()
         self._patched_globals: dict[str, object] = {}
         self._pooled_boxes: MutableMapping[str, tuple[Any, ...]] | None = None
@@ -368,18 +374,21 @@ class Quel1BoxPreviewContext:
 
     def _create_mock_boxes(
         self,
+        *,
         backend_settings: Mapping[str, dict],
+        box_types: Mapping[str, BoxType],
     ) -> dict[str, Quel1BoxMock]:
         """Create one stateful mock for each successfully dumped box."""
         box_settings = self._database._box_settings
         boxes: dict[str, Quel1BoxMock] = {}
         for box_name, snapshot in backend_settings.items():
             setting = box_settings.get(box_name)
-            if setting is None:
+            box_type = box_types.get(box_name)
+            if setting is None or box_type is None:
                 continue
             boxes[box_name] = Quel1BoxMock(
                 box_name=box_name,
-                boxtype=str(setting.boxtype),
+                boxtype=box_type.value,
                 ipaddr_sss=str(setting.ipaddr_sss),
                 snapshot=snapshot,
             )

@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from typing import Any, ClassVar, cast
 
 import pytest
+from quel_ic_config import QUEL1_BOXTYPE_ALIAS
 
 from qubex.backend.quel1.quel1_backend_controller import Quel1BackendController
 from qubex.backend.quel1.quel1_runtime_context import Quel1RuntimeContext
@@ -66,7 +67,7 @@ class _SystemConfigDatabaseStub:
                 ipaddr_wss="192.0.2.1",
                 ipaddr_sss="192.0.2.2",
                 ipaddr_css="192.0.2.3",
-                boxtype=box_type.value,
+                boxtype=QUEL1_BOXTYPE_ALIAS[box_type.value],
             )
         }
         self.created_box_classes: list[type[object]] = []
@@ -373,6 +374,7 @@ def test_preview_context_restores_quel1_box_after_exception() -> None:
     context = Quel1BoxPreviewContext(
         backend_controller=backend_controller,
         backend_settings=_backend_settings(),
+        box_types={"A": BoxType.QUEL1SE_R8},
     )
 
     def _raise_inside_context() -> None:

@@ -210,7 +210,13 @@ class Quel1SystemSynchronizer:
         parallel: bool | None = None,
         target_labels: Sequence[str] | None = None,
     ) -> ConfigurePreview:
-        """Preview QuEL-1 hardware changes for `configure()`."""
+        """
+        Preview QuEL-1 hardware changes for `configure()`.
+
+        Notes
+        -----
+        Concurrent QuEL-1 controller operations are not supported during preview.
+        """
         backend_settings = self.fetch_backend_settings_from_hardware(
             experiment_system=experiment_system,
             box_ids=box_ids,
@@ -219,6 +225,9 @@ class Quel1SystemSynchronizer:
         preview_context = Quel1BoxPreviewContext(
             backend_controller=self._backend_controller,
             backend_settings=backend_settings,
+            box_types={
+                box_id: experiment_system.get_box(box_id).type for box_id in box_ids
+            },
         )
         boxes = [
             experiment_system.get_box(box_id)
