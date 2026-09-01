@@ -182,6 +182,8 @@ classDiagram
 - `MeasurementExecutionService`
   - Measurement execution service on measurement side.
   - Owns `create_measurement_config` and `build_measurement_schedule`.
+  - Owns backend-aware frequency-sweep planning and returns session-bound
+    segment activation contexts through `Measurement.plan_frequency_sweep()`.
   - Owns runtime-side capability resolution such as
     `sampling_period` and `constraint_profile`.
   - Resolves active backend/controller session state via
@@ -284,6 +286,7 @@ Concrete classes (`Quel1BackendController`, `Quel3BackendController`) must provi
 | `disconnect` | `MeasurementSessionService` |
 | `check_link_status`, `check_clock_status`, `linkup`, `relinkup` | `MeasurementSessionService` (capability-gated via backend capability protocols) |
 | `run_measurement_schedule`, `execute`, `measure`, `measure_noise` | `MeasurementExecutionService` |
+| `plan_frequency_sweep` | `MeasurementExecutionService` |
 | `create_measurement_config`, `build_measurement_schedule` | `MeasurementExecutionService` |
 | `sampling_period`, `constraint_profile` | `MeasurementExecutionService` |
 | `apply_dc_voltages` | `MeasurementAmplificationService` |

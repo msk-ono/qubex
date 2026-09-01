@@ -14,6 +14,7 @@ from .adapters import (
     Quel3MeasurementBackendAdapter,
 )
 from .classifiers import StateClassifier, StateClassifierGMM, StateClassifierKMeans
+from .frequency_sweep import FrequencySweepPlan, FrequencySweepSegment
 from .measurement import Measurement
 from .measurement_config_factory import MeasurementConfigFactory
 from .measurement_constraint_profile import MeasurementConstraintProfile
@@ -54,6 +55,8 @@ from .sweep_measurement_executor import SweepMeasurementExecutor
 __all__ = [
     "CaptureData",
     "ClassifierRef",
+    "FrequencySweepPlan",
+    "FrequencySweepSegment",
     "MeasureData",
     "MeasureMode",
     "MeasureResult",

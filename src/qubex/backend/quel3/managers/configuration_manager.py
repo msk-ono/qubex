@@ -5,9 +5,11 @@ from __future__ import annotations
 import asyncio
 import importlib
 import logging
+import math
 from collections import defaultdict
-from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence
-from dataclasses import dataclass
+from collections.abc import Awaitable, Callable, Collection, Iterator, Mapping, Sequence
+from contextlib import contextmanager
+from dataclasses import dataclass, replace
 from typing import TypeVar
 
 from qubex.backend.quel3.infra.quelware_imports import Quel3ClientMode
@@ -129,6 +131,8 @@ class Quel3ConfigurationManager:
             str, tuple[InstrumentInfoProtocol, ...]
         ] = {}
         self._target_alias_map: dict[TargetAliasKey, str] = {}
+        self._last_deploy_requests: tuple[InstrumentDeployRequest, ...] = ()
+        self._frequency_range_override_active = False
 
     @property
     def runtime_config(self) -> Quel3RuntimeConfig:
@@ -167,6 +171,174 @@ class Quel3ConfigurationManager:
         """Return last deployed box-and-target to runtime-alias mapping."""
         return dict(self._target_alias_map)
 
+    @property
+    def last_deploy_requests(self) -> tuple[InstrumentDeployRequest, ...]:
+        """Return requests from the last successful Qubex deployment."""
+        return self._last_deploy_requests
+
+    def get_deployed_frequency_range(
+        self,
+        *,
+        box_id: str,
+        target_label: str,
+    ) -> tuple[float, float]:
+        """Return the deployed fixed-timeline frequency range in Hz."""
+        instrument_infos = self._last_deployed_instrument_infos.get(target_label, ())
+        lower_bounds: list[float] = []
+        upper_bounds: list[float] = []
+        for instrument_info in instrument_infos:
+            definition = getattr(instrument_info, "definition", None)
+            profile = getattr(definition, "profile", None)
+            lower = getattr(profile, "frequency_range_min", None)
+            upper = getattr(profile, "frequency_range_max", None)
+            if isinstance(lower, int | float) and isinstance(upper, int | float):
+                lower_bounds.append(float(lower))
+                upper_bounds.append(float(upper))
+        if lower_bounds and upper_bounds:
+            return min(lower_bounds), max(upper_bounds)
+        request = self._find_deploy_request(
+            box_id=box_id,
+            target_label=target_label,
+        )
+        if request is not None:
+            return (
+                request.frequency_range_min_hz,
+                request.frequency_range_max_hz,
+            )
+        raise RuntimeError(
+            "QuEL-3 deployed frequency range is unavailable for "
+            f"target `{target_label}`. Configure and push the system first."
+        )
+
+    @contextmanager
+    def temporary_frequency_range(
+        self,
+        *,
+        box_id: str,
+        target_label: str,
+        frequency_range_min_hz: float,
+        frequency_range_max_hz: float,
+    ) -> Iterator[None]:
+        """
+        Temporarily expand one QuEL-3 instrument frequency range.
+
+        Notes
+        -----
+        The complete instrument set on the affected port is redeployed and
+        restored. A prior Qubex deploy request snapshot is required.
+        """
+        if not math.isfinite(frequency_range_min_hz) or not math.isfinite(
+            frequency_range_max_hz
+        ):
+            raise ValueError("Temporary frequency-range bounds must be finite.")
+        if frequency_range_min_hz > frequency_range_max_hz:
+            raise ValueError("Temporary frequency-range minimum exceeds maximum.")
+        request = self._find_deploy_request(
+            box_id=box_id,
+            target_label=target_label,
+        )
+        if request is None:
+            raise RuntimeError(
+                "Temporary QuEL-3 frequency expansion requires an original deploy "
+                "request snapshot. Run configure/push before the wide sweep."
+            )
+        if self._frequency_range_override_active:
+            raise RuntimeError("A temporary QuEL-3 frequency range is already active.")
+        deployed_lower_hz, deployed_upper_hz = self.get_deployed_frequency_range(
+            box_id=box_id,
+            target_label=target_label,
+        )
+        if not (
+            math.isclose(
+                deployed_lower_hz,
+                request.frequency_range_min_hz,
+                rel_tol=0,
+                abs_tol=1e-6,
+            )
+            and math.isclose(
+                deployed_upper_hz,
+                request.frequency_range_max_hz,
+                rel_tol=0,
+                abs_tol=1e-6,
+            )
+        ):
+            raise RuntimeError(
+                "QuEL-3 deploy request snapshot no longer matches hardware cache. "
+                "Run configure/push before the wide sweep."
+            )
+        if (
+            frequency_range_min_hz >= request.frequency_range_min_hz
+            and frequency_range_max_hz <= request.frequency_range_max_hz
+        ):
+            yield
+            return
+
+        original_requests = self._last_deploy_requests
+        original_port_requests = tuple(
+            candidate
+            for candidate in original_requests
+            if candidate.port_id == request.port_id
+        )
+        requested_port_aliases = {
+            candidate.alias for candidate in original_port_requests
+        }
+        cached_port_aliases = {
+            alias
+            for alias, instrument_infos in self._last_deployed_instrument_infos.items()
+            if any(
+                str(instrument_info.port_id) == request.port_id
+                for instrument_info in instrument_infos
+            )
+        }
+        if cached_port_aliases != requested_port_aliases:
+            raise RuntimeError(
+                "QuEL-3 deploy request snapshot does not cover every instrument on "
+                f"port `{request.port_id}`. Run configure/push before the wide sweep."
+            )
+        expanded_request = replace(
+            request,
+            frequency_range_min_hz=min(
+                request.frequency_range_min_hz,
+                frequency_range_min_hz,
+            ),
+            frequency_range_max_hz=max(
+                request.frequency_range_max_hz,
+                frequency_range_max_hz,
+            ),
+        )
+        temporary_requests = tuple(
+            expanded_request if candidate is request else candidate
+            for candidate in original_requests
+        )
+        temporary_port_requests = tuple(
+            candidate
+            for candidate in temporary_requests
+            if candidate.port_id == request.port_id
+        )
+
+        self._frequency_range_override_active = True
+        try:
+            try:
+                self._redeploy_port_preserving_cache(
+                    port_requests=temporary_port_requests,
+                    complete_requests=temporary_requests,
+                )
+            except BaseException:
+                self._redeploy_port_preserving_cache(
+                    port_requests=original_port_requests,
+                    complete_requests=original_requests,
+                )
+                raise
+            try:
+                yield
+            finally:
+                self._redeploy_port_preserving_cache(
+                    port_requests=original_port_requests,
+                    complete_requests=original_requests,
+                )
+        finally:
+            self._frequency_range_override_active = False
+
     def deploy_instruments(
         self,
         *,
@@ -185,6 +357,7 @@ class Quel3ConfigurationManager:
         """Clear cached alias mappings."""
         self._last_deployed_instrument_infos = {}
         self._target_alias_map = {}
+        self._last_deploy_requests = ()
 
     def refresh_instrument_cache(self) -> dict[str, tuple[InstrumentInfoProtocol, ...]]:
         """Refresh cached alias mappings from existing quelware instruments."""
@@ -256,6 +429,7 @@ class Quel3ConfigurationManager:
         if len(requests) == 0:
             self._last_deployed_instrument_infos = {}
             self._target_alias_map = {}
+            self._last_deploy_requests = ()
             return {}
 
         client_factory = self._load_quelware_client_factory()
@@ -303,7 +477,78 @@ class Quel3ConfigurationManager:
         # Keep local alias/instrument cache aligned with the explicitly deployed
         # subset so it matches this replacement-style call behavior.
         self._target_alias_map = target_alias_map
+        self._last_deploy_requests = requests
         return deployed
+
+    def _find_deploy_request(
+        self,
+        *,
+        box_id: str,
+        target_label: str,
+    ) -> InstrumentDeployRequest | None:
+        """Find the unique deploy request that owns one logical target."""
+        matches = tuple(
+            request
+            for request in self._last_deploy_requests
+            if request.box_id == box_id and target_label in request.target_labels
+        )
+        if len(matches) > 1:
+            raise RuntimeError(
+                f"Multiple QuEL-3 deploy requests own target `{target_label}`."
+            )
+        return matches[0] if matches else None
+
+    def _redeploy_port_preserving_cache(
+        self,
+        *,
+        port_requests: tuple[InstrumentDeployRequest, ...],
+        complete_requests: tuple[InstrumentDeployRequest, ...],
+    ) -> None:
+        """Redeploy one complete port while preserving unrelated cache entries."""
+        if not port_requests:
+            raise ValueError("A QuEL-3 port redeploy requires at least one request.")
+        port_ids = {request.port_id for request in port_requests}
+        if len(port_ids) != 1:
+            raise ValueError(
+                "A temporary QuEL-3 redeploy must target exactly one port."
+            )
+
+        affected_aliases = {request.alias for request in port_requests}
+        affected_target_keys = {
+            (request.box_id, target_label)
+            for request in port_requests
+            for target_label in request.target_labels
+        }
+        previous_infos = self._last_deployed_instrument_infos
+        previous_alias_map = self._target_alias_map
+        self.deploy_instruments(requests=port_requests, parallel=False)
+        port_infos = {
+            alias: infos
+            for alias, infos in self._last_deployed_instrument_infos.items()
+            if alias in affected_aliases
+        }
+        port_alias_map = {
+            key: alias
+            for key, alias in self._target_alias_map.items()
+            if key in affected_target_keys
+        }
+        self._last_deployed_instrument_infos = {
+            **{
+                alias: infos
+                for alias, infos in previous_infos.items()
+                if alias not in affected_aliases
+            },
+            **port_infos,
+        }
+        self._target_alias_map = {
+            **{
+                key: alias
+                for key, alias in previous_alias_map.items()
+                if key not in affected_target_keys
+            },
+            **port_alias_map,
+        }
+        self._last_deploy_requests = complete_requests
 
     async def _deploy_port_batches(
         self,
@@ -465,6 +710,7 @@ class Quel3ConfigurationManager:
         deployed, _target_alias_map = self._group_instrument_cache_entries(entries)
         self._last_deployed_instrument_infos = deployed
         self._target_alias_map = {}
+        self._last_deploy_requests = ()
         return dict(deployed)
 
     @classmethod

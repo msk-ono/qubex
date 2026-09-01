@@ -105,6 +105,23 @@ def test_measure_electrical_delay_resolves_labels_via_target_registry() -> None:
             data={"custom-target": SimpleNamespace(kerneled=np.complex128(1.0 + 0.0j))}
         )
 
+    class _Plan:
+        """Provide one no-reconfiguration frequency segment."""
+
+        def __init__(self, frequencies: np.ndarray) -> None:
+            self.frequencies = tuple(float(value) for value in frequencies)
+            self.segments = (SimpleNamespace(frequencies=self.frequencies),)
+            self.requires_reconfiguration = False
+
+        @contextmanager
+        def activate(self, _segment: object) -> Any:
+            """Yield one no-op segment activation."""
+            yield
+
+    measurement = SimpleNamespace(
+        plan_frequency_sweep=lambda _target, **kwargs: _Plan(kwargs["frequencies"])
+    )
+
     service = cast(Any, object.__new__(CharacterizationService))
     experiment_system = SimpleNamespace(
         target_registry=_TargetRegistry(),
@@ -128,6 +145,7 @@ def test_measure_electrical_delay_resolves_labels_via_target_registry() -> None:
         },
         reset_awg_and_capunits=lambda box_ids=None: reset_calls.append(box_ids),
         modified_frequencies=_modified_frequencies,
+        measurement=measurement,
     )
     service.__dict__["_measurement_service"] = SimpleNamespace(measure=_measure)
     service.__dict__["_calibration_service"] = SimpleNamespace()

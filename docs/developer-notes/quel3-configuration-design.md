@@ -196,28 +196,24 @@ Status legend:
 
 ### D12. `CharacterizationService` frequency-sweep semantics on QuEL-3
 
-- Status: `IN_PROGRESS`
+- Status: `DECIDED`
 - Question: How should qubit/resonator frequency scans work on QuEL-3 where
   QuEL-1-style LO/CNCO cache operations are unavailable?
-- Current state:
-  - `CharacterizationService.scan_qubit_frequencies()` and
-    `scan_resonator_frequencies()` currently call
-    `SystemManager.modified_backend_settings(...)` for subrange retuning.
-  - `CharacterizationService.measure_electrical_delay()` also relies on the
-    same backend-settings path for far-detuned starts.
-  - QuEL-3 path currently treats unsupported backend-settings override and
-    AWG/CAP reset requests as compatibility no-op instead of raising.
-  - This fallback keeps the software path alive, but it does not yet define the
-    valid coarse/fine sweep contract for QuEL-3 hardware.
-- Required beta policy:
-  - QuEL-3 path must not rely on QuEL-1-only backend-settings cache operations.
-  - Frequency sweep contract must be explicit:
-    - either use an official quelware coarse-tuning API, or
-    - constrain sweeps to a fixed coarse setting and sweep only supported fine
-      range.
-  - When requested range exceeds supported range, fail fast with a clear error
-    and suggested valid range.
-  - Capability and behavior differences must be visible in docs and tests.
+- Decision:
+  - `Measurement.plan_frequency_sweep()` is the shared planning entrypoint;
+    `CharacterizationService` consumes its segments and keeps using the normal
+    `measure()` and `execute()` paths.
+  - QuEL-1 plans minimize LO/CNCO retunes and activate each required coarse
+    configuration through the existing temporary backend-settings context.
+  - QuEL-3 uses one direct-frequency segment when the deployed fixed-timeline
+    profile covers the requested frequencies.
+  - A wider QuEL-3 sweep temporarily redeploys the complete instrument set on
+    the affected port, expands only the selected target's profile, and restores
+    the original deploy requests on exit.
+  - Temporary redeployment fails before measurement when an exact Qubex deploy
+    request snapshot is unavailable or no longer matches the hardware cache.
+  - `SystemManager` remains responsible for state synchronization; it does not
+    own the sweep plan or measurement loop.
 
 ### D13. QuEL-3 `push()` semantics and manager ownership
 

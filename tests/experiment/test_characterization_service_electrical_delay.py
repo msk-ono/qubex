@@ -61,6 +61,73 @@ class _FakeSystemManager:
         yield
 
 
+class _FakeSweepPlan:
+    """Frequency-sweep plan stub used by characterization tests."""
+
+    def __init__(
+        self,
+        *,
+        context: _FakeContext,
+        segments: list[tuple[float, ...]],
+        requires_reconfiguration: bool,
+    ) -> None:
+        self._context = context
+        self.segments = tuple(
+            SimpleNamespace(frequencies=frequencies) for frequencies in segments
+        )
+        self.frequencies = tuple(
+            frequency for segment in segments for frequency in segment
+        )
+        self.bounds = (
+            self.segments[0].frequencies[0],
+            *(segment.frequencies[-1] for segment in self.segments),
+        )
+        self.requires_reconfiguration = requires_reconfiguration
+
+    @contextmanager
+    def activate(self, _segment: object):
+        """Activate a fake backend-settings context when requested."""
+        if self.requires_reconfiguration:
+            with self._context.system_manager.modified_backend_settings(
+                label="planned",
+            ):
+                yield
+            return
+        yield
+
+
+class _FakeMeasurement:
+    """Record frequency-sweep planning calls."""
+
+    def __init__(self, context: _FakeContext) -> None:
+        self._context = context
+        self.plan_calls: list[dict[str, Any]] = []
+
+    def plan_frequency_sweep(self, target: str, **kwargs: Any) -> _FakeSweepPlan:
+        """Return a configurable sweep plan."""
+        self.plan_calls.append({"target": target, **kwargs})
+        frequencies = kwargs.get("frequencies")
+        if frequencies is None:
+            start = kwargs.get("start_frequency")
+            if start is None:
+                target_model = self._context.targets[target]
+                start = getattr(
+                    target_model,
+                    "frequency",
+                    target_model.fine_frequency,
+                )
+            step = kwargs["frequency_step"]
+            count = kwargs["frequency_count"]
+            frequencies = start + step * np.arange(count)
+        values = tuple(float(frequency) for frequency in frequencies)
+        segments = self._context.plan_segments or [values]
+        return _FakeSweepPlan(
+            context=self._context,
+            segments=segments,
+            requires_reconfiguration=self._context.plan_requires_reconfiguration,
+        )
+
+
 class _FakeContext:
     """Experiment-context stub for electrical-delay tests."""
 
@@ -73,6 +140,9 @@ class _FakeContext:
         self.current_frequency = 1.0
         self.reset_calls: list[list[str] | None] = []
         self.system_manager = _FakeSystemManager()
+        self.plan_segments: list[tuple[float, ...]] | None = None
+        self.plan_requires_reconfiguration = True
+        self.measurement = _FakeMeasurement(self)
         read_box = SimpleNamespace(
             id="BOX0",
             traits=SimpleNamespace(
@@ -137,6 +207,7 @@ class _Quel3Context(_FakeContext):
             ),
         }
         self.system_manager = _Quel3SystemManager()
+        self.plan_requires_reconfiguration = False
         read_box = SimpleNamespace(
             id="BOX0",
             traits=SimpleNamespace(
@@ -175,11 +246,6 @@ def test_measure_electrical_delay_skips_redundant_reset_when_backend_settings_ch
     service.__dict__["_calibration_service"] = SimpleNamespace()
     service.__dict__["_pulse_service"] = SimpleNamespace()
 
-    monkeypatch.setattr(
-        "qubex.experiment.services.characterization_service.MixingUtil.calc_lo_cnco",
-        lambda *_args, **_kwargs: (10_000_000_000, 1_500_000_000, 0),
-    )
-
     tau = service.measure_electrical_delay(
         target="Q00",
         f_start=1.5,
@@ -195,6 +261,7 @@ def test_measure_electrical_delay_skips_redundant_reset_when_backend_settings_ch
     assert isinstance(tau, float)
     assert ctx.system_manager.modified_backend_settings_calls == 1
     assert ctx.reset_calls == []
+    assert ctx.measurement.plan_calls[0]["target"] == "R00"
 
 
 def test_measure_electrical_delay_quel3_uses_direct_frequency_sweep() -> None:
@@ -224,7 +291,7 @@ def test_measure_electrical_delay_quel3_uses_direct_frequency_sweep() -> None:
     )
 
     assert isinstance(tau, float)
-    assert ctx.reset_calls == []
+    assert ctx.measurement.plan_calls[0]["target"] == "R00"
 
 
 def test_scan_resonator_frequencies_avoids_duplicate_reset_per_subrange(
@@ -234,8 +301,11 @@ def test_scan_resonator_frequencies_avoids_duplicate_reset_per_subrange(
     service = cast(Any, object.__new__(CharacterizationService))
     ctx = _FakeContext()
     service.__dict__["_experiment_context"] = ctx
+    measure_calls = 0
 
     def _fake_measure(*_args, **_kwargs):
+        nonlocal measure_calls
+        measure_calls += 1
         signal = np.exp(-1j * 2 * np.pi * ctx.current_frequency)
         return SimpleNamespace(data={"Q00": SimpleNamespace(kerneled=signal)})
 
@@ -243,17 +313,7 @@ def test_scan_resonator_frequencies_avoids_duplicate_reset_per_subrange(
     service.__dict__["_calibration_service"] = SimpleNamespace()
     service.__dict__["_pulse_service"] = SimpleNamespace()
 
-    monkeypatch.setattr(
-        "qubex.experiment.services.characterization_service.ExperimentUtil.split_frequency_range",
-        lambda **_kwargs: [
-            np.array([9.8, 9.9]),
-            np.array([10.1, 10.2]),
-        ],
-    )
-    monkeypatch.setattr(
-        "qubex.experiment.services.characterization_service.MixingUtil.calc_lo_cnco",
-        lambda *_args, **_kwargs: (10_000_000_000, 1_500_000_000, 0),
-    )
+    ctx.plan_segments = [(9.8, 9.9), (10.1, 10.2)]
     monkeypatch.setattr(
         "qubex.experiment.services.characterization_service.viz.make_figure",
         lambda **_kwargs: _FakeFigure(),
@@ -278,6 +338,12 @@ def test_scan_resonator_frequencies_avoids_duplicate_reset_per_subrange(
     assert "peaks" in result.data
     assert ctx.system_manager.modified_backend_settings_calls == 2
     assert ctx.reset_calls == []
+    assert ctx.measurement.plan_calls[0]["max_segment_width"] == 0.2
+    assert measure_calls == 5
+    assert [subrange.tolist() for subrange in result.data["subranges"]] == [
+        [9.8, 9.9],
+        [10.1, 10.2],
+    ]
 
 
 def test_scan_resonator_frequencies_forwards_interval_to_electrical_delay(
@@ -311,16 +377,6 @@ def test_scan_resonator_frequencies_forwards_interval_to_electrical_delay(
     service.__dict__["_calibration_service"] = SimpleNamespace()
     service.__dict__["_pulse_service"] = SimpleNamespace()
 
-    monkeypatch.setattr(
-        "qubex.experiment.services.characterization_service.ExperimentUtil.split_frequency_range",
-        lambda **_kwargs: [
-            np.array([9.8, 9.9]),
-        ],
-    )
-    monkeypatch.setattr(
-        "qubex.experiment.services.characterization_service.MixingUtil.calc_lo_cnco",
-        lambda *_args, **_kwargs: (10_000_000_000, 1_500_000_000, 0),
-    )
     monkeypatch.setattr(
         "qubex.experiment.services.characterization_service.viz.make_figure",
         lambda **_kwargs: _FakeFigure(),

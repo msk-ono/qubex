@@ -24,6 +24,7 @@ from qubex.backend.quel1 import (
 from qubex.backend.quel3 import Quel3BackendController
 from qubex.core.async_bridge import DEFAULT_TIMEOUT_SECONDS, get_shared_async_bridge
 from qubex.measurement.classifiers.state_classifier import StateClassifier
+from qubex.measurement.frequency_sweep import FrequencySweepPlan, FrequencySweepPlanner
 from qubex.measurement.measurement_config_factory import MeasurementConfigFactory
 from qubex.measurement.measurement_constraint_profile import (
     MeasurementConstraintProfile,
@@ -321,6 +322,30 @@ class MeasurementExecutionService:
 
         """
         return self.experiment_system.get_diff_frequency(target)
+
+    def plan_frequency_sweep(
+        self,
+        target: str,
+        *,
+        frequencies: ArrayLike | None = None,
+        start_frequency: float | None = None,
+        frequency_step: float | None = None,
+        frequency_count: int | None = None,
+        max_segment_width: float | None = None,
+    ) -> FrequencySweepPlan:
+        """Build a backend-aware frequency-sweep plan in GHz."""
+        return FrequencySweepPlanner(
+            system_manager=self.system_manager,
+            experiment_system=self.experiment_system,
+            backend_controller=self.backend_controller,
+        ).plan(
+            target,
+            frequencies=frequencies,
+            start_frequency=start_frequency,
+            frequency_step=frequency_step,
+            frequency_count=frequency_count,
+            max_segment_width=max_segment_width,
+        )
 
     def _resolve_loopback_capture_targets(
         self,

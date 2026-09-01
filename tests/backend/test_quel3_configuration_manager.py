@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -196,6 +197,176 @@ def test_deploy_instruments_calls_session_api(
         "Q00-2",
         "Q00-3",
     ]
+    assert manager.last_deploy_requests == (request,)
+
+
+def test_temporary_frequency_range_redeploys_whole_port_and_restores(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A temporary range should keep sibling instruments and restore the port."""
+    manager = Quel3ConfigurationManager()
+    requests = (
+        InstrumentDeployRequest(
+            port_id="unit0:tx_p01",
+            role="TRANSMITTER",
+            frequency_range_min_hz=4.8e9,
+            frequency_range_max_hz=5.2e9,
+            alias="Q00",
+            target_labels=("Q00",),
+            box_id="BOX0",
+        ),
+        InstrumentDeployRequest(
+            port_id="unit0:tx_p01",
+            role="TRANSMITTER",
+            frequency_range_min_hz=5.8e9,
+            frequency_range_max_hz=6.2e9,
+            alias="Q01",
+            target_labels=("Q01",),
+            box_id="BOX0",
+        ),
+        InstrumentDeployRequest(
+            port_id="unit0:tx_p02",
+            role="TRANSMITTER",
+            frequency_range_min_hz=6.8e9,
+            frequency_range_max_hz=7.2e9,
+            alias="Q02",
+            target_labels=("Q02",),
+            box_id="BOX0",
+        ),
+    )
+    manager.__dict__["_last_deploy_requests"] = requests
+    manager.__dict__["_last_deployed_instrument_infos"] = {
+        request.alias: (SimpleNamespace(port_id=request.port_id),)
+        for request in requests
+    }
+    manager.__dict__["_target_alias_map"] = {
+        (request.box_id, target): request.alias
+        for request in requests
+        for target in request.target_labels
+    }
+    deploy_calls: list[tuple[InstrumentDeployRequest, ...]] = []
+
+    def _fake_deploy_instruments(
+        *,
+        requests: tuple[InstrumentDeployRequest, ...],
+        parallel: bool = True,
+    ) -> dict[str, tuple[Any, ...]]:
+        _ = parallel
+        deploy_calls.append(tuple(requests))
+        deployed = {
+            request.alias: (SimpleNamespace(port_id=request.port_id),)
+            for request in requests
+        }
+        manager.__dict__["_last_deployed_instrument_infos"] = deployed
+        manager.__dict__["_target_alias_map"] = {
+            (request.box_id, target): request.alias
+            for request in requests
+            for target in request.target_labels
+        }
+        manager.__dict__["_last_deploy_requests"] = tuple(requests)
+        return deployed
+
+    monkeypatch.setattr(manager, "deploy_instruments", _fake_deploy_instruments)
+
+    with manager.temporary_frequency_range(
+        box_id="BOX0",
+        target_label="Q00",
+        frequency_range_min_hz=4.5e9,
+        frequency_range_max_hz=5.4e9,
+    ):
+        assert set(manager.last_deployed_instrument_infos) == {"Q00", "Q01", "Q02"}
+        assert manager.last_deploy_requests[0].frequency_range_min_hz == pytest.approx(
+            4.5e9
+        )
+        assert manager.last_deploy_requests[0].frequency_range_max_hz == pytest.approx(
+            5.4e9
+        )
+
+    assert [[request.alias for request in call] for call in deploy_calls] == [
+        ["Q00", "Q01"],
+        ["Q00", "Q01"],
+    ]
+    assert manager.last_deploy_requests == requests
+    assert set(manager.last_deployed_instrument_infos) == {"Q00", "Q01", "Q02"}
+
+
+def test_temporary_frequency_range_restores_after_measurement_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A temporary QuEL-3 range should restore deployment after body failure."""
+    manager = Quel3ConfigurationManager()
+    request = InstrumentDeployRequest(
+        port_id="unit0:tx_p01",
+        role="TRANSMITTER",
+        frequency_range_min_hz=4.8e9,
+        frequency_range_max_hz=5.2e9,
+        alias="Q00",
+        target_labels=("Q00",),
+        box_id="BOX0",
+    )
+    manager.__dict__["_last_deploy_requests"] = (request,)
+    manager.__dict__["_last_deployed_instrument_infos"] = {
+        "Q00": (SimpleNamespace(port_id=request.port_id),)
+    }
+    manager.__dict__["_target_alias_map"] = {("BOX0", "Q00"): "Q00"}
+    deploy_calls: list[tuple[InstrumentDeployRequest, ...]] = []
+
+    def _fake_deploy_instruments(
+        *,
+        requests: tuple[InstrumentDeployRequest, ...],
+        parallel: bool = True,
+    ) -> dict[str, tuple[Any, ...]]:
+        _ = parallel
+        deploy_calls.append(tuple(requests))
+        manager.__dict__["_last_deploy_requests"] = tuple(requests)
+        return manager.last_deployed_instrument_infos
+
+    monkeypatch.setattr(manager, "deploy_instruments", _fake_deploy_instruments)
+
+    with (
+        pytest.raises(RuntimeError, match="measurement failed"),
+        manager.temporary_frequency_range(
+            box_id="BOX0",
+            target_label="Q00",
+            frequency_range_min_hz=4.5e9,
+            frequency_range_max_hz=5.4e9,
+        ),
+    ):
+        raise RuntimeError("measurement failed")
+
+    assert len(deploy_calls) == 2
+    assert manager.last_deploy_requests == (request,)
+
+
+def test_temporary_frequency_range_requires_original_deploy_request() -> None:
+    """A temporary range without a request snapshot should require configure/push."""
+    manager = Quel3ConfigurationManager()
+    manager.__dict__["_last_deployed_instrument_infos"] = {
+        "Q00": (
+            _CachedInstrumentInfo(
+                id="instrument-0",
+                port_id="unit0:tx_p01",
+                definition=_CachedDefinition(
+                    alias="Q00",
+                    profile=_CachedProfile(
+                        frequency_range_min=4.8e9,
+                        frequency_range_max=5.2e9,
+                    ),
+                ),
+            ),
+        )
+    }
+
+    with (
+        pytest.raises(RuntimeError, match="configure/push"),
+        manager.temporary_frequency_range(
+            box_id="BOX0",
+            target_label="Q00",
+            frequency_range_min_hz=4.5e9,
+            frequency_range_max_hz=5.4e9,
+        ),
+    ):
+        pass
 
 
 def test_deploy_instruments_recreates_session_after_transient_request_failure(
@@ -1652,6 +1823,16 @@ def test_fetch_backend_settings_from_hardware_delegates_to_state_reader(
 def test_sync_backend_settings_to_cache_restores_alias_mapping_from_snapshot() -> None:
     """Given hardware snapshot, cache sync should restore alias mappings."""
     manager = Quel3ConfigurationManager()
+    deploy_request = InstrumentDeployRequest(
+        port_id="quel3-02-a01:tx_p04",
+        role="TRANSMITTER",
+        frequency_range_min_hz=4.1e9,
+        frequency_range_max_hz=4.3e9,
+        alias="Q00",
+        target_labels=("Q00",),
+        box_id="BOX1",
+    )
+    manager.__dict__["_last_deploy_requests"] = (deploy_request,)
     transmitter_instruments = {
         f"Q00-{index}": {
             "resource_id": f"inst-q00-{index}",
@@ -1725,6 +1906,7 @@ def test_sync_backend_settings_to_cache_restores_alias_mapping_from_snapshot() -
     assert profile is not None
     assert profile.frequency_range_min == pytest.approx(4.1e9)
     assert profile.frequency_range_max == pytest.approx(4.3e9)
+    assert manager.last_deploy_requests == (deploy_request,)
 
 
 def test_deploy_instruments_replaces_cached_alias(

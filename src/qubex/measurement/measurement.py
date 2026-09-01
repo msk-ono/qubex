@@ -33,6 +33,7 @@ from qubex.system import (
 from qubex.typing import ConfigurationMode, IQArray, TargetMap
 
 from .classifiers.state_classifier import StateClassifier
+from .frequency_sweep import FrequencySweepPlan
 from .measurement_constraint_profile import MeasurementConstraintProfile
 from .measurement_context import MeasurementContext
 from .measurement_pulse_factory import MeasurementPulseFactory
@@ -699,6 +700,48 @@ class Measurement:
         return await self.execution_service.run_measurement(
             schedule=schedule,
             config=config,
+        )
+
+    def plan_frequency_sweep(
+        self,
+        target: str,
+        *,
+        frequencies: npt.ArrayLike | None = None,
+        start_frequency: float | None = None,
+        frequency_step: float | None = None,
+        frequency_count: int | None = None,
+        max_segment_width: float | None = None,
+    ) -> FrequencySweepPlan:
+        """
+        Build a backend-aware frequency-sweep plan.
+
+        Parameters
+        ----------
+        target : str
+            Generator target label to sweep.
+        frequencies : ArrayLike | None, optional
+            Explicit frequency values in GHz and execution order.
+        start_frequency : float | None, optional
+            Generated sweep start in GHz. The backend default is used when omitted.
+        frequency_step : float | None, optional
+            Generated sweep step in GHz.
+        frequency_count : int | None, optional
+            Number of generated frequency values.
+        max_segment_width : float | None, optional
+            Preferred maximum segment width in GHz.
+
+        Returns
+        -------
+        FrequencySweepPlan
+            Session-bound plan whose segments can be activated in sequence.
+        """
+        return self.execution_service.plan_frequency_sweep(
+            target,
+            frequencies=frequencies,
+            start_frequency=start_frequency,
+            frequency_step=frequency_step,
+            frequency_count=frequency_count,
+            max_segment_width=max_segment_width,
         )
 
     async def run_sweep_measurement(

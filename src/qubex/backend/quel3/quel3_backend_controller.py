@@ -7,7 +7,8 @@ built on quelware-client managers.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
+from contextlib import contextmanager
 
 from qubex.backend.backend_controller import (
     BackendController,
@@ -266,6 +267,50 @@ class Quel3BackendController(BackendController):
                 requests=requests,
                 parallel=parallel,
             )
+        finally:
+            self._execution_manager.invalidate_instrument_resolver()
+
+    @contextmanager
+    def temporary_frequency_range(
+        self,
+        *,
+        box_id: str,
+        target_label: str,
+        frequency_range_min_hz: float,
+        frequency_range_max_hz: float,
+    ) -> Iterator[None]:
+        """
+        Temporarily expand one deployed instrument frequency range.
+
+        Parameters
+        ----------
+        box_id : str
+            Logical box identifier owning the target.
+        target_label : str
+            Logical generator target label.
+        frequency_range_min_hz : float
+            Required lower frequency bound in Hz.
+        frequency_range_max_hz : float
+            Required upper frequency bound in Hz.
+
+        Yields
+        ------
+        None
+            Context where the expanded deployment is active.
+
+        Notes
+        -----
+        The affected port is redeployed on entry and restored on exit.
+        """
+        try:
+            with self._configuration_manager.temporary_frequency_range(
+                box_id=box_id,
+                target_label=target_label,
+                frequency_range_min_hz=frequency_range_min_hz,
+                frequency_range_max_hz=frequency_range_max_hz,
+            ):
+                self._execution_manager.invalidate_instrument_resolver()
+                yield
         finally:
             self._execution_manager.invalidate_instrument_resolver()
 
