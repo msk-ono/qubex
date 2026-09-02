@@ -48,6 +48,7 @@ from qubex.experiment.models.experiment_result import (
 )
 from qubex.experiment.models.rabi_param import RabiParam
 from qubex.experiment.models.result import Result
+from qubex.measurement.models.measurement_schedule import MeasurementSchedule
 from qubex.typing import TargetMap
 from qubex.visualization import COLORS
 
@@ -3110,18 +3111,23 @@ class CharacterizationService:
         interval: float,
     ) -> NDArray:
         """Measure all readout powers at one frequency through the sweep API."""
+        base_schedule = self._measurement_service.build_measurement_schedule(
+            PulseSchedule([qubit_label]),
+            frequencies={read_label: frequency},
+            readout_amplitudes={qubit_label: 1.0},
+            readout_duration=DEFAULT_RESONATOR_SPECTROSCOPY_READOUT_DURATION,
+            readout_ramp_time=DEFAULT_RESONATOR_SPECTROSCOPY_READOUT_RAMPTIME,
+            readout_ramp_type=DEFAULT_RESONATOR_SPECTROSCOPY_READOUT_RAMP_TYPE,
+            final_measurement=True,
+            plot=False,
+        )
 
-        def build_schedule(power: Any) -> Any:
+        def build_schedule(power: Any) -> MeasurementSchedule:
             amplitude = np.sqrt(10 ** (float(power) / 10))
-            return self._measurement_service.build_measurement_schedule(
-                PulseSchedule([qubit_label]),
-                frequencies={read_label: frequency},
-                readout_amplitudes={qubit_label: amplitude},
-                readout_duration=DEFAULT_RESONATOR_SPECTROSCOPY_READOUT_DURATION,
-                readout_ramp_time=DEFAULT_RESONATOR_SPECTROSCOPY_READOUT_RAMPTIME,
-                readout_ramp_type=DEFAULT_RESONATOR_SPECTROSCOPY_READOUT_RAMP_TYPE,
-                final_measurement=True,
-                plot=False,
+            return base_schedule.model_copy(
+                update={
+                    "pulse_schedule": base_schedule.pulse_schedule.scaled(amplitude)
+                }
             )
 
         bridge = get_shared_async_bridge(key="experiment")

@@ -8,8 +8,11 @@ from typing import Any, cast
 
 import numpy as np
 import pytest
+from qxpulse import FlatTop, PulseSchedule
 
 from qubex.experiment.services.characterization_service import CharacterizationService
+from qubex.measurement import MeasurementSchedule
+from qubex.measurement.models.capture_schedule import CaptureSchedule
 
 
 class _FakeFigure:
@@ -465,12 +468,35 @@ def test_resonator_spectroscopy_batch_sweeps_power_within_each_frequency(
     build_calls: list[dict[str, Any]] = []
     run_calls: list[dict[str, Any]] = []
 
-    def _build_measurement_schedule(_schedule: object, **kwargs: Any) -> object:
+    def _build_measurement_schedule(
+        _schedule: object,
+        **kwargs: Any,
+    ) -> MeasurementSchedule:
         build_calls.append(kwargs)
-        return SimpleNamespace(
-            frequency=kwargs["frequencies"]["R00"],
-            amplitude=kwargs["readout_amplitudes"]["Q00"],
+        with PulseSchedule(["Q00", "R00"]) as pulse_schedule:
+            pulse_schedule.add(
+                "R00",
+                FlatTop(
+                    duration=16.0,
+                    amplitude=kwargs["readout_amplitudes"]["Q00"],
+                    tau=4.0,
+                ),
+            )
+        pulse_schedule.set_frequencies(kwargs["frequencies"])
+        return MeasurementSchedule(
+            pulse_schedule=pulse_schedule,
+            capture_schedule=CaptureSchedule(captures=[]),
         )
+
+    def _readout_pulse(schedule: MeasurementSchedule) -> FlatTop:
+        waveforms = schedule.pulse_schedule.get_sequence(
+            "R00",
+            copy=False,
+        ).get_flattened_waveforms()
+        assert len(waveforms) == 1
+        pulse = waveforms[0]
+        assert isinstance(pulse, FlatTop)
+        return pulse
 
     async def _run_sweep_measurement(
         schedule: Any,
@@ -494,8 +520,13 @@ def test_resonator_spectroscopy_batch_sweeps_power_within_each_frequency(
                         "Q00": [
                             SimpleNamespace(
                                 data=np.asarray(
-                                    built.amplitude
-                                    * np.exp(-1j * 2 * np.pi * built.frequency)
+                                    _readout_pulse(built).values.max()
+                                    * np.exp(
+                                        -1j
+                                        * 2
+                                        * np.pi
+                                        * built.pulse_schedule.get_frequencies()["R00"]
+                                    )
                                 )
                             )
                         ]
@@ -540,7 +571,9 @@ def test_resonator_spectroscopy_batch_sweeps_power_within_each_frequency(
         [-20.0, -10.0],
     ]
     assert [
-        schedule.frequency for call in run_calls for schedule in call["schedules"]
+        schedule.pulse_schedule.get_frequencies()["R00"]
+        for call in run_calls
+        for schedule in call["schedules"]
     ] == [
         6.0,
         6.0,
@@ -558,8 +591,23 @@ def test_resonator_spectroscopy_batch_sweeps_power_within_each_frequency(
         ctx.measurement.plan_calls[0]["frequencies"],
         np.array([6.0, 6.1, 6.2]),
     )
+    assert len(build_calls) == 3
+    assert [call["readout_amplitudes"] for call in build_calls] == [
+        {"Q00": 1.0},
+        {"Q00": 1.0},
+        {"Q00": 1.0},
+    ]
+    assert all(
+        len({_readout_pulse(schedule).shape_hash for schedule in call["schedules"]})
+        == 1
+        for call in run_calls
+    )
     np.testing.assert_allclose(
-        [schedule.amplitude for call in run_calls for schedule in call["schedules"]],
+        [
+            _readout_pulse(schedule).scale
+            for call in run_calls
+            for schedule in call["schedules"]
+        ],
         [0.1, np.sqrt(0.1)] * 3,
         rtol=1e-12,
         atol=0.0,
