@@ -1820,8 +1820,8 @@ def test_fetch_backend_settings_from_hardware_delegates_to_state_reader(
     ]
 
 
-def test_sync_backend_settings_to_cache_restores_alias_mapping_from_snapshot() -> None:
-    """Given hardware snapshot, cache sync should restore alias mappings."""
+def test_sync_backend_settings_to_cache_restores_runtime_state() -> None:
+    """Given hardware snapshot, cache sync should restore runtime state."""
     manager = Quel3ConfigurationManager()
     deploy_request = InstrumentDeployRequest(
         port_id="quel3-02-a01:tx_p04",
@@ -1832,7 +1832,6 @@ def test_sync_backend_settings_to_cache_restores_alias_mapping_from_snapshot() -
         target_labels=("Q00",),
         box_id="BOX1",
     )
-    manager.__dict__["_last_deploy_requests"] = (deploy_request,)
     transmitter_instruments = {
         f"Q00-{index}": {
             "resource_id": f"inst-q00-{index}",
@@ -1906,7 +1905,18 @@ def test_sync_backend_settings_to_cache_restores_alias_mapping_from_snapshot() -
     assert profile is not None
     assert profile.frequency_range_min == pytest.approx(4.1e9)
     assert profile.frequency_range_max == pytest.approx(4.3e9)
-    assert manager.last_deploy_requests == (deploy_request,)
+    assert manager.last_deploy_requests == (
+        deploy_request,
+        InstrumentDeployRequest(
+            port_id="quel3-02-a02:trx_p00p04",
+            role="TRANSCEIVER",
+            frequency_range_min_hz=5.9e9,
+            frequency_range_max_hz=6.1e9,
+            alias="RQ00",
+            target_labels=("RQ00",),
+            box_id="BOX2",
+        ),
+    )
 
 
 def test_deploy_instruments_replaces_cached_alias(

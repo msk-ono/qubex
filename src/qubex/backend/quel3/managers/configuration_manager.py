@@ -10,7 +10,7 @@ from collections import defaultdict
 from collections.abc import Awaitable, Callable, Collection, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
-from typing import TypeVar
+from typing import TypeVar, cast
 
 from qubex.backend.quel3.infra.quelware_imports import Quel3ClientMode
 from qubex.backend.quel3.instrument_groups import (
@@ -173,7 +173,7 @@ class Quel3ConfigurationManager:
 
     @property
     def last_deploy_requests(self) -> tuple[InstrumentDeployRequest, ...]:
-        """Return requests from the last successful Qubex deployment."""
+        """Return restorable requests for the current instrument deployment."""
         return self._last_deploy_requests
 
     def get_deployed_frequency_range(
@@ -225,7 +225,8 @@ class Quel3ConfigurationManager:
         Notes
         -----
         The complete instrument set on the affected port is redeployed and
-        restored. A prior Qubex deploy request snapshot is required.
+        restored. A restorable request snapshot from push or hardware sync is
+        required.
         """
         if not math.isfinite(frequency_range_min_hz) or not math.isfinite(
             frequency_range_max_hz
@@ -239,8 +240,9 @@ class Quel3ConfigurationManager:
         )
         if request is None:
             raise RuntimeError(
-                "Temporary QuEL-3 frequency expansion requires an original deploy "
-                "request snapshot. Run configure/push before the wide sweep."
+                "Temporary QuEL-3 frequency expansion requires a restorable deploy "
+                "request snapshot. Run connect to synchronize hardware state, or "
+                "configure/push before the wide sweep."
             )
         if self._frequency_range_override_active:
             raise RuntimeError("A temporary QuEL-3 frequency range is already active.")
@@ -264,7 +266,7 @@ class Quel3ConfigurationManager:
         ):
             raise RuntimeError(
                 "QuEL-3 deploy request snapshot no longer matches hardware cache. "
-                "Run configure/push before the wide sweep."
+                "Reconnect or configure/push before the wide sweep."
             )
         if (
             frequency_range_min_hz >= request.frequency_range_min_hz
@@ -293,7 +295,8 @@ class Quel3ConfigurationManager:
         if cached_port_aliases != requested_port_aliases:
             raise RuntimeError(
                 "QuEL-3 deploy request snapshot does not cover every instrument on "
-                f"port `{request.port_id}`. Run configure/push before the wide sweep."
+                f"port `{request.port_id}`. Reconnect or configure/push before the "
+                "wide sweep."
             )
         expanded_request = replace(
             request,
@@ -418,6 +421,10 @@ class Quel3ConfigurationManager:
         deployed, target_alias_map = self._group_instrument_cache_entries(entries)
         self._last_deployed_instrument_infos = deployed
         self._target_alias_map = target_alias_map
+        self._last_deploy_requests = self._reconstruct_deploy_requests_from_cache(
+            deployed=deployed,
+            target_alias_map=target_alias_map,
+        )
 
     async def _deploy_instruments(
         self,
@@ -744,6 +751,96 @@ class Quel3ConfigurationManager:
             for alias, infos in grouped_infos.items()
         }
         return deployed, target_alias_map
+
+    @classmethod
+    def _reconstruct_deploy_requests_from_cache(
+        cls,
+        *,
+        deployed: Mapping[str, tuple[InstrumentInfoProtocol, ...]],
+        target_alias_map: Mapping[TargetAliasKey, str],
+    ) -> tuple[InstrumentDeployRequest, ...]:
+        """Reconstruct restorable deploy requests from a hardware snapshot."""
+        requests: list[InstrumentDeployRequest] = []
+        supported_roles = {
+            "TRANSMITTER",
+            "TRANSCEIVER",
+            "TRANSCEIVER_LOOPBACK",
+            "RECEIVER",
+        }
+        for box_id, target_label in sorted(target_alias_map):
+            instrument_infos = deployed.get(target_label, ())
+            port_ids = {str(info.port_id) for info in instrument_infos}
+            role_names = {
+                cls._normalize_enum_name(info.definition.role)
+                .rsplit(".", maxsplit=1)[-1]
+                .upper()
+                for info in instrument_infos
+            }
+            mode_names = {
+                cls._normalize_enum_name(info.definition.mode)
+                .rsplit(".", maxsplit=1)[-1]
+                .upper()
+                for info in instrument_infos
+            }
+            ranges = {
+                (
+                    getattr(
+                        getattr(info.definition, "profile", None),
+                        "frequency_range_min",
+                        None,
+                    ),
+                    getattr(
+                        getattr(info.definition, "profile", None),
+                        "frequency_range_max",
+                        None,
+                    ),
+                )
+                for info in instrument_infos
+            }
+            if (
+                len(port_ids) != 1
+                or len(role_names) != 1
+                or not role_names.issubset(supported_roles)
+                or mode_names != {"FIXED_TIMELINE"}
+                or len(ranges) != 1
+            ):
+                logger.warning(
+                    "Skipping unrestorable QuEL-3 instrument snapshot: "
+                    "box_id=%s target=%s",
+                    box_id,
+                    target_label,
+                )
+                continue
+
+            lower_hz, upper_hz = next(iter(ranges))
+            if (
+                not isinstance(lower_hz, int | float)
+                or not isinstance(upper_hz, int | float)
+                or not math.isfinite(float(lower_hz))
+                or not math.isfinite(float(upper_hz))
+                or lower_hz > upper_hz
+            ):
+                logger.warning(
+                    "Skipping QuEL-3 snapshot without a valid frequency range: "
+                    "box_id=%s target=%s",
+                    box_id,
+                    target_label,
+                )
+                continue
+
+            role = cast(RoleName, next(iter(role_names)))
+            requests.append(
+                InstrumentDeployRequest(
+                    port_id=next(iter(port_ids)),
+                    role=role,
+                    frequency_range_min_hz=float(lower_hz),
+                    frequency_range_max_hz=float(upper_hz),
+                    alias=target_label,
+                    target_labels=(target_label,),
+                    box_id=box_id,
+                )
+            )
+        return tuple(requests)
 
     def _load_quelware_client_factory(self) -> QuelwareClientFactory:
         """Import quelware client factory lazily."""
