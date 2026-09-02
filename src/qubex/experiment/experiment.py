@@ -4806,17 +4806,24 @@ class Experiment:
         *,
         frequency_range: ArrayLike | None = None,
         power_range: ArrayLike | None = None,
+        sweep_execution: Literal["sequential", "batch"] | None = None,
         electrical_delay: float | None = None,
         n_shots: int | None = None,
         shot_interval: float | None = None,
         plot: bool | None = None,
         save_image: bool | None = None,
     ) -> Result:
-        """Run resonator spectroscopy for a target."""
+        """
+        Run resonator spectroscopy for a target.
+
+        Use `sweep_execution="batch"` to sweep readout power within each
+        frequency through the sweep-measurement API.
+        """
         return self.characterization_service.resonator_spectroscopy(
             target=target,
             frequency_range=frequency_range,
             power_range=power_range,
+            sweep_execution=sweep_execution,
             electrical_delay=electrical_delay,
             shots=n_shots,
             interval=shot_interval,

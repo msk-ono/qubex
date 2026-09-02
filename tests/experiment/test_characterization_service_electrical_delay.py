@@ -23,6 +23,10 @@ class _FakeFigure:
         """Accept scatter traces."""
         return
 
+    def add_trace(self, *_args, **_kwargs) -> None:
+        """Accept generic traces."""
+        return
+
     def add_vline(self, **_kwargs) -> None:
         """Accept vertical markers."""
         return
@@ -448,6 +452,125 @@ def test_scan_resonator_frequencies_quel3_uses_direct_frequency_sweep(
     )
 
     assert result.data["peaks"].size == 0
+
+
+def test_resonator_spectroscopy_batch_sweeps_power_within_each_frequency(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Batch spectroscopy should sweep all powers within each frequency."""
+    service = cast(Any, object.__new__(CharacterizationService))
+    ctx = _Quel3Context()
+    service.__dict__["_experiment_context"] = ctx
+
+    build_calls: list[dict[str, Any]] = []
+    run_calls: list[dict[str, Any]] = []
+
+    def _build_measurement_schedule(_schedule: object, **kwargs: Any) -> object:
+        build_calls.append(kwargs)
+        return SimpleNamespace(
+            frequency=kwargs["frequencies"]["R00"],
+            amplitude=kwargs["readout_amplitudes"]["Q00"],
+        )
+
+    async def _run_sweep_measurement(
+        schedule: Any,
+        *,
+        sweep_values: Any,
+        **kwargs: Any,
+    ) -> object:
+        values = list(sweep_values)
+        schedules = [schedule(value) for value in values]
+        run_calls.append(
+            {
+                "sweep_values": values,
+                "schedules": schedules,
+                **kwargs,
+            }
+        )
+        return SimpleNamespace(
+            results=[
+                SimpleNamespace(
+                    data={
+                        "Q00": [
+                            SimpleNamespace(
+                                data=np.asarray(
+                                    built.amplitude
+                                    * np.exp(-1j * 2 * np.pi * built.frequency)
+                                )
+                            )
+                        ]
+                    }
+                )
+                for built in schedules
+            ]
+        )
+
+    service.__dict__["_measurement_service"] = SimpleNamespace(
+        build_measurement_schedule=_build_measurement_schedule,
+        run_sweep_measurement=_run_sweep_measurement,
+    )
+    service.__dict__["_calibration_service"] = SimpleNamespace()
+    service.__dict__["_pulse_service"] = SimpleNamespace()
+
+    def _reject_sequential(*_args: Any, **_kwargs: Any) -> None:
+        raise AssertionError("batch execution must not call the sequential scan loop")
+
+    service.scan_resonator_frequencies = _reject_sequential
+    monkeypatch.setattr(
+        "qubex.experiment.services.characterization_service.viz.make_figure",
+        lambda **_kwargs: _FakeFigure(),
+    )
+
+    result = service.resonator_spectroscopy(
+        target="Q00",
+        frequency_range=np.array([6.0, 6.1, 6.2]),
+        power_range=np.array([-20.0, -10.0]),
+        electrical_delay=0.0,
+        shots=2,
+        interval=3.0,
+        sweep_execution="batch",
+        plot=False,
+        save_image=False,
+    )
+
+    assert len(run_calls) == 3
+    assert [call["sweep_values"] for call in run_calls] == [
+        [-20.0, -10.0],
+        [-20.0, -10.0],
+        [-20.0, -10.0],
+    ]
+    assert [
+        schedule.frequency for call in run_calls for schedule in call["schedules"]
+    ] == [
+        6.0,
+        6.0,
+        6.1,
+        6.1,
+        6.2,
+        6.2,
+    ]
+    assert [call["n_shots"] for call in run_calls] == [2, 2, 2]
+    assert [call["shot_interval"] for call in run_calls] == [3.0, 3.0, 3.0]
+    assert len(ctx.measurement.plan_calls) == 1
+    assert ctx.measurement.plan_calls[0]["target"] == "R00"
+    assert ctx.measurement.plan_calls[0]["max_segment_width"] == 0.3
+    np.testing.assert_array_equal(
+        ctx.measurement.plan_calls[0]["frequencies"],
+        np.array([6.0, 6.1, 6.2]),
+    )
+    np.testing.assert_allclose(
+        [schedule.amplitude for call in run_calls for schedule in call["schedules"]],
+        [0.1, np.sqrt(0.1)] * 3,
+        rtol=1e-12,
+        atol=0.0,
+    )
+    assert result.data["data"].shape == (2, 3)
+    np.testing.assert_allclose(
+        result.data["data"],
+        np.full((2, 3), 0.2 * np.pi),
+        rtol=1e-12,
+        atol=1e-12,
+    )
 
 
 def test_scan_qubit_frequencies_quel3_uses_direct_frequency_sweep(

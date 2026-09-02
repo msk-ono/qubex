@@ -28,6 +28,7 @@ from typing_extensions import deprecated
 
 import qubex.visualization as viz
 from qubex.analysis import FitResult, FitStatus, fitting
+from qubex.core.async_bridge import get_shared_async_bridge
 from qubex.experiment.experiment_constants import (
     CALIBRATION_SHOTS,
     DEFAULT_INTERVAL,
@@ -2876,6 +2877,7 @@ class CharacterizationService:
         *,
         frequency_range: ArrayLike | None = None,
         power_range: ArrayLike | None = None,
+        sweep_execution: Literal["sequential", "batch"] | None = None,
         electrical_delay: float | None = None,
         shots: int | None = None,
         interval: float | None = None,
@@ -2893,6 +2895,10 @@ class CharacterizationService:
             Frequency sweep range in GHz.
         power_range
             Readout power sweep range in dB.
+        sweep_execution
+            Sweep execution mode. `"batch"` sweeps all readout powers at each
+            frequency through `run_sweep_measurement()`. The default is
+            `"sequential"`.
         """
         if shots is None:
             shots = DEFAULT_SHOTS
@@ -2904,6 +2910,10 @@ class CharacterizationService:
             save_image = True
         if target is None:
             target = self.ctx.qubit_labels[0]
+        if sweep_execution is None:
+            sweep_execution = "sequential"
+        if sweep_execution not in ("sequential", "batch"):
+            raise ValueError("sweep_execution must be 'sequential' or 'batch'.")
 
         if power_range is None:
             power_range = np.arange(
@@ -2932,23 +2942,34 @@ class CharacterizationService:
                 plot=False,
             )
 
-        result = []
-        for power in tqdm(power_range):
-            power_linear = 10 ** (power / 10)
-            amplitude = np.sqrt(power_linear)
-            phases_diff = self.scan_resonator_frequencies(
-                target,
+        if sweep_execution == "batch":
+            result = self._run_batched_resonator_spectroscopy(
+                target=target,
+                qubit_label=qubit_label,
                 frequency_range=frequency_range,
+                power_range=power_range,
                 electrical_delay=electrical_delay,
-                readout_amplitude=amplitude,
                 shots=shots,
                 interval=interval,
-                plot=False,
-                save_image=False,
-            )["phases_diff"]
-            abs_phases_diff = np.abs(phases_diff)
-            abs_phases_diff = np.append(abs_phases_diff, abs_phases_diff[-1])
-            result.append(abs_phases_diff)
+            )
+        else:
+            result = []
+            for power in tqdm(power_range):
+                power_linear = 10 ** (power / 10)
+                amplitude = np.sqrt(power_linear)
+                phases_diff = self.scan_resonator_frequencies(
+                    target,
+                    frequency_range=frequency_range,
+                    electrical_delay=electrical_delay,
+                    readout_amplitude=amplitude,
+                    shots=shots,
+                    interval=interval,
+                    plot=False,
+                    save_image=False,
+                )["phases_diff"]
+                abs_phases_diff = np.abs(phases_diff)
+                abs_phases_diff = np.append(abs_phases_diff, abs_phases_diff[-1])
+                result.append(abs_phases_diff)
 
         fig = viz.make_figure()
         fig.add_trace(
@@ -2992,6 +3013,143 @@ class CharacterizationService:
             },
             figure=fig,
         )
+
+    def _run_batched_resonator_spectroscopy(
+        self,
+        *,
+        target: str,
+        qubit_label: str,
+        frequency_range: NDArray,
+        power_range: NDArray,
+        electrical_delay: float,
+        shots: int,
+        interval: float,
+    ) -> NDArray:
+        """Run packed power sweeps within backend-compatible frequency segments."""
+        read_label = self.ctx.resolve_read_label(target)
+        plan = self.ctx.measurement.plan_frequency_sweep(
+            read_label,
+            frequencies=frequency_range,
+            max_segment_width=DEFAULT_RESONATOR_SPECTROSCOPY_SUBRANGE_WIDTH_GHZ,
+        )
+        frequencies = np.asarray(plan.frequencies)
+        signals = np.empty(
+            (len(power_range), len(frequencies)),
+            dtype=np.complex128,
+        )
+        phase_offsets = np.zeros(len(power_range), dtype=float)
+        frequency_index = 0
+
+        for segment in tqdm(
+            plan.segments,
+            desc=f"resonator spectroscopy segments for {target}",
+        ):
+            with plan.activate(segment):
+                for segment_index, frequency in enumerate(
+                    tqdm(
+                        segment.frequencies,
+                        desc="readout frequency",
+                        leave=False,
+                    )
+                ):
+                    if frequency_index > 0 and segment_index == 0:
+                        previous_frequency = frequencies[frequency_index - 1]
+                        reference_raw = self._measure_resonator_power_sweep(
+                            qubit_label=qubit_label,
+                            read_label=read_label,
+                            frequency=float(previous_frequency),
+                            power_range=power_range,
+                            shots=shots,
+                            interval=interval,
+                        )
+                        reference_adjust = (
+                            2 * np.pi * previous_frequency * electrical_delay
+                            - phase_offsets
+                        )
+                        reference_signals = reference_raw * np.exp(
+                            1j * reference_adjust
+                        )
+                        phase_offsets += np.angle(reference_signals) - np.angle(
+                            signals[:, frequency_index - 1]
+                        )
+
+                    raw_signals = self._measure_resonator_power_sweep(
+                        qubit_label=qubit_label,
+                        read_label=read_label,
+                        frequency=float(frequency),
+                        power_range=power_range,
+                        shots=shots,
+                        interval=interval,
+                    )
+                    phase_adjust = (
+                        2 * np.pi * frequency * electrical_delay - phase_offsets
+                    )
+                    signals[:, frequency_index] = raw_signals * np.exp(
+                        1j * phase_adjust
+                    )
+                    frequency_index += 1
+
+        phases = np.angle(signals)
+        phases -= phases[:, :1] - np.pi
+        phases %= 2 * np.pi
+        phases -= np.pi
+        phase_differences = np.abs(np.diff(np.unwrap(phases, axis=1), axis=1))
+        return np.concatenate(
+            (phase_differences, phase_differences[:, -1:]),
+            axis=1,
+        )
+
+    def _measure_resonator_power_sweep(
+        self,
+        *,
+        qubit_label: str,
+        read_label: str,
+        frequency: float,
+        power_range: NDArray,
+        shots: int,
+        interval: float,
+    ) -> NDArray:
+        """Measure all readout powers at one frequency through the sweep API."""
+
+        def build_schedule(power: Any) -> Any:
+            amplitude = np.sqrt(10 ** (float(power) / 10))
+            return self._measurement_service.build_measurement_schedule(
+                PulseSchedule([qubit_label]),
+                frequencies={read_label: frequency},
+                readout_amplitudes={qubit_label: amplitude},
+                readout_duration=DEFAULT_RESONATOR_SPECTROSCOPY_READOUT_DURATION,
+                readout_ramp_time=DEFAULT_RESONATOR_SPECTROSCOPY_READOUT_RAMPTIME,
+                readout_ramp_type=DEFAULT_RESONATOR_SPECTROSCOPY_READOUT_RAMP_TYPE,
+                final_measurement=True,
+                plot=False,
+            )
+
+        bridge = get_shared_async_bridge(key="experiment")
+        sweep_result = bridge.run(
+            lambda: self._measurement_service.run_sweep_measurement(
+                build_schedule,
+                sweep_values=power_range,
+                n_shots=shots,
+                shot_interval=interval,
+                shot_averaging=True,
+                time_integration=True,
+                state_classification=False,
+                plot=False,
+                enable_tqdm=False,
+            )
+        )
+        if len(sweep_result.results) != len(power_range):
+            raise RuntimeError("Power-sweep result count does not match power_range.")
+
+        signals = []
+        for point_result in sweep_result.results:
+            captures = point_result.data.get(qubit_label, [])
+            if len(captures) == 0:
+                raise RuntimeError(
+                    f"Power-sweep result has no capture for `{qubit_label}`."
+                )
+            signals.append(complex(np.mean(np.asarray(captures[-1].data))))
+        return np.asarray(signals, dtype=np.complex128)
 
     def measure_reflection_coefficient(
         self,

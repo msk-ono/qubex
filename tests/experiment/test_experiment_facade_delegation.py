@@ -48,6 +48,10 @@ class _CharacterizationServiceStub:
         self.calls.append(("find_optimal_readout_frequency", kwargs))
         return "find_optimal_readout_frequency_result"
 
+    def resonator_spectroscopy(self, **kwargs: Any) -> str:
+        self.calls.append(("resonator_spectroscopy", kwargs))
+        return "resonator_spectroscopy_result"
+
 
 class _MeasurementServiceStub:
     def __init__(self) -> None:
@@ -391,6 +395,25 @@ def test_find_optimal_readout_frequency_delegates_objective_to_characterization_
             },
         )
     ]
+
+
+def test_resonator_spectroscopy_delegates_sweep_execution() -> None:
+    """Resonator spectroscopy should delegate its requested execution mode."""
+    exp = object.__new__(Experiment)
+    characterization_stub = _CharacterizationServiceStub()
+    exp.__dict__["_characterization_service"] = characterization_stub
+
+    result = exp.resonator_spectroscopy(
+        target="Q00",
+        frequency_range=[6.0, 6.1],
+        power_range=[-20.0, -10.0],
+        sweep_execution="batch",
+        plot=False,
+    )
+
+    assert result == "resonator_spectroscopy_result"
+    assert characterization_stub.calls[0][0] == "resonator_spectroscopy"
+    assert characterization_stub.calls[0][1]["sweep_execution"] == "batch"
 
 
 def test_print_environment_delegates_to_context() -> None:
