@@ -28,7 +28,10 @@ from qubex.measurement.models import (
     MeasurementSchedule,
 )
 from qubex.measurement.models.capture_schedule import Capture, CaptureSchedule
-from qubex.pulse import Arbitrary, Blank, PulseArray
+from qubex.measurement.services.measurement_execution_service import (
+    MeasurementExecutionService,
+)
+from qubex.pulse import Arbitrary, Blank, PulseArray, PulseSchedule, Rect, VirtualZ
 from qubex.system import TargetRegistry
 from qubex.system.target_type import TargetType
 from qubex.typing import MeasurementMode
@@ -235,6 +238,60 @@ def test_quel3_adapter_allows_capture_beyond_pulse_duration() -> None:
     assert result is None
     assert isinstance(payload, Quel3ExecutionPayload)
     assert payload.fixed_timelines[target].length_ns == pytest.approx(11.0)
+
+
+@pytest.mark.parametrize("theta_deg", [270.0, 360.0, -360.0, 447750.0000000333])
+@pytest.mark.parametrize("phase_deg", [0.0, 30.0])
+def test_quel3_adapter_preserves_standalone_event_phases_when_packing(
+    theta_deg: float,
+    phase_deg: float,
+) -> None:
+    """Packed events should retain standalone phases after large nested virtual Z shifts."""
+    schedules = []
+    for _ in range(3):
+        with PulseSchedule(["Q00"]) as pulse_schedule:
+            pulse_schedule.add(
+                "Q00",
+                Rect(
+                    duration=4.0,
+                    amplitude=0.2,
+                    phase=np.deg2rad(phase_deg),
+                    sampling_period=0.4,
+                ),
+            )
+            pulse_schedule.add("Q00", PulseArray([VirtualZ(np.deg2rad(theta_deg))]))
+        schedules.append(
+            MeasurementSchedule(
+                pulse_schedule=pulse_schedule,
+                capture_schedule=CaptureSchedule(captures=[]),
+            )
+        )
+    service = MeasurementExecutionService.__new__(MeasurementExecutionService)
+    merged = service._merge_measurement_schedules(  # noqa: SLF001
+        schedules=schedules, shot_interval=8.0
+    )
+    adapter = Quel3MeasurementBackendAdapter(
+        backend_controller=_make_backend_controller(),
+        experiment_system=cast(Any, _FakeExperimentSystem()),
+        constraint_profile=MeasurementConstraintProfile.quel3(0.4),
+    )
+    config = _make_config()
+    standalone_phases = []
+    for schedule in schedules:
+        payload = adapter.build_execution_request(
+            schedule=schedule, config=config
+        ).payload
+        assert isinstance(payload, Quel3ExecutionPayload)
+        standalone_phases.extend(
+            event.phase_offset_deg for event in payload.fixed_timelines["Q00"].events
+        )
+
+    payload = adapter.build_execution_request(schedule=merged, config=config).payload
+
+    assert isinstance(payload, Quel3ExecutionPayload)
+    phases = [event.phase_offset_deg for event in payload.fixed_timelines["Q00"].events]
+    np.testing.assert_allclose(phases, standalone_phases, rtol=0.0, atol=1e-9)
+    np.testing.assert_allclose(phases, phase_deg, rtol=0.0, atol=1e-9)
 
 
 def test_quel3_adapter_builds_fixed_timeline_payload() -> None:
