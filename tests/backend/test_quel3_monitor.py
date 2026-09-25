@@ -20,6 +20,7 @@ from qubex.backend.quel3 import (
 )
 from qubex.backend.quel3.interfaces.client import InstrumentInfoProtocol
 from qubex.backend.quel3.managers import Quel3ConfigurationManager
+from qubex.backend.quel3.models import InstrumentConfiguration, InstrumentSpec
 
 
 class _MonitorClient:
@@ -128,20 +129,134 @@ def test_configure_monitor_mode_requires_instruments_cleared(
     assert client.configured == []
 
 
+def test_get_monitor_mode_reads_live_unit_control(
+    monitor_runtime: tuple[Quel3BackendController, _MonitorClient],
+) -> None:
+    """The current mode should be read from the unit before instrument changes."""
+    controller, client = monitor_runtime
+    client.controls["quel3.monitor.mode"] = "loopback"
+
+    mode = controller.configuration_manager.get_monitor_mode(unit_label="unit-a")
+
+    assert mode == "loopback"
+    assert client.configured == []
+
+
 @dataclass
 class _MonitorExecutionManager:
     request: BackendExecutionRequest | None = None
+    requests: list[BackendExecutionRequest] | None = None
     sampling_period_ns: float = 0.4
 
     def execute_sync(
         self, *, request: BackendExecutionRequest, **kwargs: object
     ) -> Quel3BackendExecutionResult:
         self.request = request
+        if self.requests is None:
+            self.requests = []
+        self.requests.append(request)
+        monitor_alias = next(
+            alias
+            for alias, timeline in request.payload.fixed_timelines.items()
+            if timeline.capture_windows
+        )
         return Quel3BackendExecutionResult(
             status={},
-            data={"monitor": [np.array([[1 + 2j, 3 + 4j]])]},
+            data={monitor_alias: [np.array([[len(self.requests) + 2j, 3 + 4j]])]},
             config={"sampling_period_ns": 0.4},
         )
+
+
+def _instrument_info(alias: str, port: str) -> InstrumentInfoProtocol:
+    """Create one deployable hardware snapshot entry for monitor tests."""
+    return cast(
+        InstrumentInfoProtocol,
+        SimpleNamespace(
+            id=f"unit-a:{alias}",
+            port_id=f"unit-a:{port}",
+            definition=SimpleNamespace(
+                alias=alias,
+                mode="FIXED_TIMELINE",
+                role="TRANSMITTER",
+                profile=SimpleNamespace(
+                    frequency_range_min=4e9,
+                    frequency_range_max=6e9,
+                ),
+            ),
+        ),
+    )
+
+
+@pytest.fixture
+def monitor_schedule_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[Quel3BackendController, _MonitorExecutionManager, list[tuple[object, ...]]]:
+    """Emulate one unit's instrument writes while retaining call order."""
+    manager = _MonitorExecutionManager()
+    controller = Quel3BackendController(execution_manager=cast(Any, manager))
+    originals = (
+        _instrument_info("output-a", "tx_p00"),
+        _instrument_info("output-b", "tx_p01"),
+        _instrument_info("idle", "tx_p02"),
+    )
+    actions: list[tuple[object, ...]] = []
+    monkeypatch.setattr(
+        controller._hardware_state_reader,
+        "read_instrument_infos",
+        lambda **kwargs: originals,
+    )
+    monkeypatch.setattr(
+        controller._configuration_manager,
+        "get_monitor_mode",
+        lambda **kwargs: "disabled",
+        raising=False,
+    )
+
+    def clear(*, unit_label: str, parallel: bool = True) -> None:
+        actions.append(("clear", unit_label))
+        controller._instrument_cache.replace_units(
+            unit_labels=(unit_label,), instrument_infos=()
+        )
+
+    def configure(*, unit_label: str, mode: str = "loopback") -> str:
+        actions.append(("mode", mode))
+        return mode
+
+    def deploy(
+        *, instrument: InstrumentSpec, append: bool = True, parallel: bool = True
+    ) -> InstrumentInfoProtocol:
+        actions.append(
+            (
+                "deploy",
+                instrument.alias,
+                instrument.port_id,
+                instrument.role,
+                instrument.frequency_range_min_hz,
+                instrument.frequency_range_max_hz,
+            )
+        )
+        info = _instrument_info(instrument.alias, instrument.port_id.partition(":")[2])
+        controller._instrument_cache.replace_ports(
+            port_ids=(instrument.port_id,), instrument_infos=(info,)
+        )
+        return info
+
+    def restore(
+        *, configuration: InstrumentConfiguration, parallel: bool = True
+    ) -> dict[str, InstrumentInfoProtocol]:
+        actions.append(
+            ("restore", tuple(spec.alias for spec in configuration.instruments))
+        )
+        controller._instrument_cache.replace_units(
+            unit_labels=("unit-a",), instrument_infos=originals
+        )
+        return {info.definition.alias: info for info in originals}
+
+    monkeypatch.setattr(controller, "clear_instruments", clear)
+    monkeypatch.setattr(controller, "configure_monitor_mode", configure)
+    monkeypatch.setattr(controller, "deploy_instrument", deploy)
+    monkeypatch.setattr(controller, "deploy_instruments", restore)
+    return controller, manager, actions
 
 
 def test_run_monitor_iq_returns_raw_capture_and_builds_two_timelines() -> None:
@@ -266,23 +381,13 @@ def test_run_monitor_iq_raises_when_capture_is_empty() -> None:
         )
 
 
-def test_run_monitor_schedule_builds_sparse_events_and_reuses_shape() -> None:
+def test_run_monitor_schedule_builds_sparse_events_and_reuses_shape(
+    monitor_schedule_runtime: tuple[
+        Quel3BackendController, _MonitorExecutionManager, list[tuple[object, ...]]
+    ],
+) -> None:
     """A schedule should preserve pulse timing and modifiers without sampling blanks."""
-    manager = _MonitorExecutionManager()
-    controller = Quel3BackendController(execution_manager=cast(Any, manager))
-    controller._instrument_cache.replace_all(
-        instrument_infos=tuple(
-            cast(
-                InstrumentInfoProtocol,
-                SimpleNamespace(
-                    id=f"unit-a:{alias}",
-                    port_id=f"unit-a:{port}",
-                    definition=SimpleNamespace(alias=alias),
-                ),
-            )
-            for alias, port in (("output", "tx_p00"), ("monitor", "mon"))
-        )
-    )
+    controller, manager, actions = monitor_schedule_runtime
     with PulseSchedule() as schedule:
         schedule.add(
             "drive",
@@ -302,12 +407,13 @@ def test_run_monitor_schedule_builds_sparse_events_and_reuses_shape() -> None:
     schedule.set_frequency("drive", 5.0)
 
     iq = controller.run_monitor_schedule(
+        unit_label="unit-a",
         pulse_schedule=schedule,
-        output_alias="output",
+        output_alias="output-a",
         monitor_alias="monitor",
     )
 
-    assert np.array_equal(iq, [[1 + 2j, 3 + 4j]])
+    assert np.array_equal(iq["drive"], [[1 + 2j, 3 + 4j]])
     assert manager.request is not None
     payload = manager.request.payload
     assert len(payload.waveform_library) == 1
@@ -315,51 +421,197 @@ def test_run_monitor_schedule_builds_sparse_events_and_reuses_shape() -> None:
         next(iter(payload.waveform_library.values())).iq_array,
         [0.25 + 0.5j, 0.5 + 0.25j],
     )
-    events = payload.fixed_timelines["output"].events
+    events = payload.fixed_timelines["output-a"].events
     assert len(events) == 2
     assert events[0].waveform_name == events[1].waveform_name
     assert [event.start_offset_ns for event in events] == pytest.approx([0, 1.6])
     assert [event.gain for event in events] == pytest.approx([0.5, 0.7])
     assert [event.phase_offset_deg for event in events] == pytest.approx([30, 90])
-    assert payload.fixed_timelines["output"].frequency_hz == pytest.approx(5e9)
+    assert payload.fixed_timelines["output-a"].frequency_hz == pytest.approx(5e9)
+    assert payload.fixed_timelines["monitor"].frequency_hz == pytest.approx(5e9)
     assert payload.fixed_timelines["monitor"].capture_windows[0].length_ns == (
         pytest.approx(2.4)
     )
+    assert actions == [
+        ("clear", "unit-a"),
+        ("mode", "loopback"),
+        ("deploy", "output-a", "unit-a:tx_p00", "TRANSMITTER", 4e9, 6e9),
+        ("deploy", "monitor", "unit-a:mon", "RECEIVER", 4e9, 6e9),
+        ("clear", "unit-a"),
+        ("mode", "disabled"),
+        ("restore", ("idle", "output-a", "output-b")),
+    ]
+    assert {
+        spec.alias for spec in controller.get_instrument_configuration().instruments
+    } == {"output-a", "output-b", "idle"}
 
 
-def test_run_monitor_schedule_executes_multiple_output_channels() -> None:
-    """A multi-channel schedule should emit timelines for every mapped output."""
-    manager = _MonitorExecutionManager()
-    controller = Quel3BackendController(execution_manager=cast(Any, manager))
-    controller._instrument_cache.replace_all(
-        instrument_infos=tuple(
-            cast(
-                InstrumentInfoProtocol,
-                SimpleNamespace(
-                    id=f"unit-a:{alias}",
-                    port_id=f"unit-a:{port}",
-                    definition=SimpleNamespace(alias=alias),
-                ),
-            )
-            for alias, port in (
-                ("output-a", "tx_p00"),
-                ("output-b", "tx_p01"),
-                ("monitor", "mon"),
-            )
-        )
-    )
+def test_run_monitor_schedule_executes_multiple_output_channels(
+    monitor_schedule_runtime: tuple[
+        Quel3BackendController, _MonitorExecutionManager, list[tuple[object, ...]]
+    ],
+) -> None:
+    """Each target should capture on the monitor port with its own frequency."""
+    controller, manager, actions = monitor_schedule_runtime
     with PulseSchedule() as schedule:
         schedule.add("drive-a", Arbitrary([0.25 + 0j], sampling_period=0.4))
         schedule.add("drive-b", Arbitrary([0.5 + 0j], sampling_period=0.4))
+    schedule.set_frequency("drive-a", 5.0)
+    schedule.set_frequency("drive-b", 5.5)
 
-    controller.run_monitor_schedule(
+    captured = controller.run_monitor_schedule(
+        unit_label="unit-a",
         pulse_schedule=schedule,
         output_aliases={"drive-a": "output-a", "drive-b": "output-b"},
         monitor_alias="monitor",
     )
 
-    assert manager.request is not None
-    timelines = manager.request.payload.fixed_timelines
-    assert set(timelines) == {"output-a", "output-b", "monitor"}
-    assert len(timelines["output-a"].events) == 1
-    assert len(timelines["output-b"].events) == 1
+    assert set(captured) == {"drive-a", "drive-b"}
+    assert captured["drive-a"][0, 0] == 1 + 2j
+    assert captured["drive-b"][0, 0] == 2 + 2j
+    assert manager.requests is not None
+    assert len(manager.requests) == 2
+    for request, output, frequency in zip(
+        manager.requests, ("output-a", "output-b"), (5e9, 5.5e9), strict=True
+    ):
+        timelines = request.payload.fixed_timelines
+        assert set(timelines) == {output, "monitor"}
+        assert timelines[output].frequency_hz == pytest.approx(frequency)
+        assert timelines["monitor"].frequency_hz == pytest.approx(frequency)
+    assert [entry[1] for entry in actions if entry[0] == "deploy"] == [
+        "output-a",
+        "monitor",
+        "output-b",
+        "monitor",
+    ]
+
+
+def test_run_monitor_schedule_restores_instruments_after_execution_failure(
+    monitor_schedule_runtime: tuple[
+        Quel3BackendController, _MonitorExecutionManager, list[tuple[object, ...]]
+    ],
+) -> None:
+    """Execution failure should still restore the original mode and instruments."""
+    controller, manager, actions = monitor_schedule_runtime
+    manager.execute_sync = cast(
+        Any, lambda **kwargs: (_ for _ in ()).throw(RuntimeError("execute failed"))
+    )
+    with PulseSchedule() as schedule:
+        schedule.add("drive", Arbitrary([1 + 0j], sampling_period=0.4))
+    schedule.set_frequency("drive", 5.0)
+
+    with pytest.raises(RuntimeError, match="execute failed"):
+        controller.run_monitor_schedule(
+            unit_label="unit-a",
+            pulse_schedule=schedule,
+            output_alias="output-a",
+            monitor_alias="monitor",
+        )
+
+    assert actions[-3:] == [
+        ("clear", "unit-a"),
+        ("mode", "disabled"),
+        ("restore", ("idle", "output-a", "output-b")),
+    ]
+
+
+def test_run_monitor_schedule_restores_instruments_after_deployment_failure(
+    monitor_schedule_runtime: tuple[
+        Quel3BackendController, _MonitorExecutionManager, list[tuple[object, ...]]
+    ],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Deployment failure should still clear temporary resources and restore state."""
+    controller, _, actions = monitor_schedule_runtime
+    original_deploy = controller.deploy_instrument
+
+    def fail_monitor_deploy(
+        *, instrument: InstrumentSpec, append: bool = True, parallel: bool = True
+    ) -> InstrumentInfoProtocol:
+        if instrument.port_id == "unit-a:mon":
+            raise RuntimeError("monitor deployment failed")
+        return original_deploy(instrument=instrument, append=append, parallel=parallel)
+
+    monkeypatch.setattr(controller, "deploy_instrument", fail_monitor_deploy)
+    with PulseSchedule() as schedule:
+        schedule.add("drive", Arbitrary([1 + 0j], sampling_period=0.4))
+    schedule.set_frequency("drive", 5.0)
+
+    with pytest.raises(RuntimeError, match="monitor deployment failed"):
+        controller.run_monitor_schedule(
+            unit_label="unit-a",
+            pulse_schedule=schedule,
+            output_alias="output-a",
+            monitor_alias="monitor",
+        )
+
+    assert actions[-3:] == [
+        ("clear", "unit-a"),
+        ("mode", "disabled"),
+        ("restore", ("idle", "output-a", "output-b")),
+    ]
+
+
+def test_run_monitor_schedule_rejects_missing_frequency_before_deletion(
+    monitor_schedule_runtime: tuple[
+        Quel3BackendController, _MonitorExecutionManager, list[tuple[object, ...]]
+    ],
+) -> None:
+    """A target without a frequency should leave hardware untouched."""
+    controller, _, actions = monitor_schedule_runtime
+    with PulseSchedule() as schedule:
+        schedule.add("drive", Arbitrary([1 + 0j], sampling_period=0.4))
+
+    with pytest.raises(ValueError, match="frequency"):
+        controller.run_monitor_schedule(
+            unit_label="unit-a",
+            pulse_schedule=schedule,
+            output_alias="output-a",
+            monitor_alias="monitor",
+        )
+
+    assert actions == []
+
+
+def test_run_monitor_schedule_rejects_missing_target_before_deletion(
+    monitor_schedule_runtime: tuple[
+        Quel3BackendController, _MonitorExecutionManager, list[tuple[object, ...]]
+    ],
+) -> None:
+    """An unknown output alias should leave the unit's instruments untouched."""
+    controller, _, actions = monitor_schedule_runtime
+    with PulseSchedule() as schedule:
+        schedule.add("drive", Arbitrary([1 + 0j], sampling_period=0.4))
+    schedule.set_frequency("drive", 5.0)
+
+    with pytest.raises(ValueError, match="has no instrument"):
+        controller.run_monitor_schedule(
+            unit_label="unit-a",
+            pulse_schedule=schedule,
+            output_alias="missing",
+            monitor_alias="monitor",
+        )
+
+    assert actions == []
+
+
+def test_run_monitor_schedule_rejects_invalid_capture_before_deletion(
+    monitor_schedule_runtime: tuple[
+        Quel3BackendController, _MonitorExecutionManager, list[tuple[object, ...]]
+    ],
+) -> None:
+    """Invalid capture settings should not trigger instrument deletion."""
+    controller, _, actions = monitor_schedule_runtime
+    with PulseSchedule() as schedule:
+        schedule.add("drive", Arbitrary([1 + 0j], sampling_period=0.4))
+    schedule.set_frequency("drive", 5.0)
+
+    with pytest.raises(ValueError, match="n_iterations"):
+        controller.run_monitor_schedule(
+            unit_label="unit-a",
+            pulse_schedule=schedule,
+            output_alias="output-a",
+            n_iterations=0,
+        )
+
+    assert actions == []
