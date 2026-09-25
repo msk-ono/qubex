@@ -7,14 +7,20 @@ built on quelware-client managers.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping, Sequence
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+import numpy as np
+import numpy.typing as npt
 
 from qubex.backend.backend_controller import (
     BackendController,
     BackendExecutionRequest,
     BackendExecutionResult,
 )
+from qubex.backend.quel3.builders import Quel3PulseEventBuilder
 from qubex.backend.quel3.infra import Quel3ClientMode
 from qubex.backend.quel3.instrument_cache import InstrumentCache
 from qubex.backend.quel3.interfaces.client import InstrumentInfoProtocol
@@ -30,10 +36,20 @@ from .managers import (
 from .models import (
     InstrumentConfiguration,
     InstrumentSpec,
+    Quel3BackendExecutionResult,
+    Quel3CaptureMode,
+    Quel3CaptureWindow,
+    Quel3ExecutionPayload,
+    Quel3FixedTimeline,
     Quel3HardwareState,
     Quel3HardwareStateView,
+    Quel3Waveform,
+    Quel3WaveformEvent,
 )
 from .quel3_backend_constants import CAPTURE_DECIMATION_FACTOR, SAMPLING_PERIOD_NS
+
+if TYPE_CHECKING:
+    from qxpulse import PulseSchedule
 
 
 class Quel3BackendController(BackendController):
@@ -301,6 +317,45 @@ class Quel3BackendController(BackendController):
             parallel=parallel,
         )
 
+    def configure_monitor_mode(self, *, unit_label: str, mode: str = "loopback") -> str:
+        """
+        Set a unit's monitor mode before deploying output and monitor instruments.
+
+        Parameters
+        ----------
+        unit_label : str
+            Exact QuEL-3 unit label.
+        mode : str, default="loopback"
+            Value supported by the unit's `quel3.monitor.mode` control.
+
+        Returns
+        -------
+        str
+            Applied mode reported by quelware.
+
+        Raises
+        ------
+        RuntimeError
+            If the controller has cached instruments on this unit. Call
+            `clear_instruments(unit_label=...)` before changing the mode.
+
+        Notes
+        -----
+        Quelware also rejects a mode change if uncached instruments remain
+        deployed on the unit. Re-deploy instruments after changing the mode.
+        """
+        if any(
+            info.port_id.startswith(f"{unit_label}:")
+            for info in self._instrument_cache.snapshot().values()
+        ):
+            raise RuntimeError(
+                "Clear deployed instruments with clear_instruments() before "
+                "changing QuEL-3 monitor mode."
+            )
+        return self._configuration_manager.configure_monitor_mode(
+            unit_label=unit_label, mode=mode
+        )
+
     def deploy_instrument(
         self,
         *,
@@ -510,6 +565,251 @@ class Quel3BackendController(BackendController):
     def sampling_period_ns(self) -> float:
         """Return backend sampling period in ns."""
         return self._sampling_period_ns
+
+    def run_monitor_iq(
+        self,
+        *,
+        output_alias: str,
+        monitor_alias: str,
+        waveform: npt.ArrayLike,
+        capture_start_ns: float = 0.0,
+        capture_length_ns: float | None = None,
+        n_iterations: int = 1,
+        shot_interval_ns: float = 0.0,
+        parallel: bool = True,
+    ) -> npt.NDArray[np.complex128]:
+        """
+        Play one waveform and return raw IQ captured on the monitor port.
+
+        Parameters
+        ----------
+        output_alias : str
+            Cached output instrument alias.
+        monitor_alias : str
+            Cached receiver alias deployed on the same unit's `mon` port.
+        waveform : ArrayLike
+            One-dimensional complex IQ waveform on the backend sampling grid.
+        capture_start_ns : float, default=0.0
+            Monitor capture start time relative to the output trigger, in ns.
+        capture_length_ns : float | None, optional
+            Capture duration in ns. Defaults to the waveform duration.
+        n_iterations : int, default=1
+            Number of unaveraged captures.
+        shot_interval_ns : float, default=0.0
+            Idle interval between iterations, in ns.
+        parallel : bool, default=True
+            Whether to parallelize instrument execution phases.
+
+        Returns
+        -------
+        NDArray[np.complex128]
+            Raw complex IQ with shape `(n_iterations, samples)`.
+
+        Notes
+        -----
+        Configure monitor mode and deploy both instruments before calling this
+        method. The returned IQ uses the same coordinates as normal QuEL-3
+        backend capture results.
+        """
+        iq_array = np.asarray(waveform, dtype=np.complex128)
+        if iq_array.ndim != 1 or iq_array.size == 0:
+            raise ValueError("Monitor waveform must be a nonempty 1D IQ array.")
+        if not np.all(np.isfinite(iq_array)):
+            raise ValueError("Monitor waveform IQ values must be finite.")
+        duration_ns = float(iq_array.size) * self._sampling_period_ns
+        length_ns = duration_ns if capture_length_ns is None else capture_length_ns
+        return self._execute_monitor_payload(
+            output_timelines={
+                output_alias: Quel3FixedTimeline(
+                    events=(Quel3WaveformEvent("monitor_output", 0.0),),
+                    capture_windows=(),
+                    length_ns=duration_ns,
+                )
+            },
+            waveform_library={
+                "monitor_output": Quel3Waveform(
+                    iq_array=iq_array, sampling_period_ns=self._sampling_period_ns
+                )
+            },
+            duration_ns=duration_ns,
+            monitor_alias=monitor_alias,
+            capture_start_ns=capture_start_ns,
+            capture_length_ns=length_ns,
+            n_iterations=n_iterations,
+            shot_interval_ns=shot_interval_ns,
+            parallel=parallel,
+        )
+
+    def run_monitor_schedule(
+        self,
+        *,
+        pulse_schedule: PulseSchedule,
+        monitor_alias: str,
+        output_alias: str | None = None,
+        output_aliases: Mapping[str, str] | None = None,
+        capture_start_ns: float = 0.0,
+        capture_length_ns: float | None = None,
+        n_iterations: int = 1,
+        shot_interval_ns: float = 0.0,
+        parallel: bool = True,
+    ) -> npt.NDArray[np.complex128]:
+        """
+        Play a `PulseSchedule` as sparse events and capture raw monitor IQ.
+
+        Parameters
+        ----------
+        pulse_schedule : PulseSchedule
+            Valid schedule with one or more output channels.
+        monitor_alias : str
+            Cached receiver alias deployed on the same unit's `mon` port.
+        output_alias : str | None, optional
+            Cached output alias for a one-channel schedule.
+        output_aliases : Mapping[str, str] | None, optional
+            Map schedule channel labels to cached output aliases. If omitted,
+            each channel label is used as its output alias.
+        capture_start_ns : float, default=0.0
+            Capture start time relative to the output trigger, in ns.
+        capture_length_ns : float | None, optional
+            Capture duration in ns. Defaults to the schedule duration.
+        n_iterations : int, default=1
+            Number of unaveraged captures.
+        shot_interval_ns : float, default=0.0
+            Idle interval between iterations, in ns.
+        parallel : bool, default=True
+            Whether to parallelize instrument execution phases.
+
+        Returns
+        -------
+        NDArray[np.complex128]
+            Raw complex IQ with shape `(n_iterations, samples)`.
+
+        Notes
+        -----
+        Pulses become waveform-library entries and timed events. Blanks advance
+        event offsets without allocating zero-filled waveform samples.
+        """
+        labels = pulse_schedule.labels
+        if not labels:
+            raise ValueError("Monitor PulseSchedule must have at least one channel.")
+        if not pulse_schedule.is_valid():
+            raise ValueError("Monitor PulseSchedule is invalid.")
+        if output_alias is not None and output_aliases is not None:
+            raise ValueError("Specify output_alias or output_aliases, not both.")
+        if output_alias is not None:
+            if len(labels) != 1:
+                raise ValueError("output_alias requires exactly one schedule channel.")
+            resolved_aliases = {labels[0]: output_alias}
+        elif output_aliases is not None:
+            if set(output_aliases) != set(labels):
+                raise ValueError("output_aliases must map every schedule channel.")
+            resolved_aliases = dict(output_aliases)
+        else:
+            resolved_aliases = {label: label for label in labels}
+        if len(set(resolved_aliases.values())) != len(labels):
+            raise ValueError("Output aliases must be distinct.")
+
+        waveform_library: dict[str, Quel3Waveform] = {}
+        waveform_name_by_shape_key: dict[tuple[str, int], str] = {}
+        waveform_index = 0
+        output_timelines: dict[str, Quel3FixedTimeline] = {}
+        for label in labels:
+            events, waveform_index = Quel3PulseEventBuilder.build(
+                sequence=pulse_schedule.get_sequence(label, copy=False),
+                waveform_name_by_shape_key=waveform_name_by_shape_key,
+                waveform_library=waveform_library,
+                waveform_index=waveform_index,
+            )
+            frequency_ghz = pulse_schedule.get_frequency(label)
+            if frequency_ghz is not None and not math.isfinite(frequency_ghz):
+                raise ValueError("Monitor PulseSchedule frequency must be finite.")
+            output_timelines[resolved_aliases[label]] = Quel3FixedTimeline(
+                events=events,
+                capture_windows=(),
+                length_ns=pulse_schedule.duration,
+                frequency_hz=(None if frequency_ghz is None else frequency_ghz * 1e9),
+            )
+
+        return self._execute_monitor_payload(
+            output_timelines=output_timelines,
+            waveform_library=waveform_library,
+            duration_ns=pulse_schedule.duration,
+            monitor_alias=monitor_alias,
+            capture_start_ns=capture_start_ns,
+            capture_length_ns=(
+                pulse_schedule.duration
+                if capture_length_ns is None
+                else capture_length_ns
+            ),
+            n_iterations=n_iterations,
+            shot_interval_ns=shot_interval_ns,
+            parallel=parallel,
+        )
+
+    def _execute_monitor_payload(
+        self,
+        *,
+        output_timelines: dict[str, Quel3FixedTimeline],
+        waveform_library: dict[str, Quel3Waveform],
+        duration_ns: float,
+        monitor_alias: str,
+        capture_start_ns: float,
+        capture_length_ns: float,
+        n_iterations: int,
+        shot_interval_ns: float,
+        parallel: bool,
+    ) -> npt.NDArray[np.complex128]:
+        """Validate monitor bindings, execute sparse timelines, and return IQ."""
+        if monitor_alias in output_timelines:
+            raise ValueError("Output and monitor aliases must be distinct.")
+        monitor_info = self._instrument_cache.get(monitor_alias)
+        monitor_unit, _, monitor_port = monitor_info.port_id.partition(":")
+        if monitor_port != "mon":
+            raise ValueError("Monitor alias must be deployed on the monitor port.")
+        for alias in output_timelines:
+            output_info = self._instrument_cache.get(alias)
+            if output_info.port_id.partition(":")[0] != monitor_unit:
+                raise ValueError(
+                    "Output and monitor aliases must belong to the same unit."
+                )
+        if n_iterations < 1:
+            raise ValueError("n_iterations must be positive.")
+        if not math.isfinite(shot_interval_ns) or shot_interval_ns < 0:
+            raise ValueError("shot_interval_ns must be finite and nonnegative.")
+        if not math.isfinite(capture_start_ns) or capture_start_ns < 0:
+            raise ValueError("capture_start_ns must be finite and nonnegative.")
+        if not math.isfinite(capture_length_ns) or capture_length_ns <= 0:
+            raise ValueError("capture_length_ns must be finite and positive.")
+        timeline_length_ns = max(duration_ns, capture_start_ns + capture_length_ns)
+        payload = Quel3ExecutionPayload(
+            waveform_library=waveform_library,
+            fixed_timelines={
+                **output_timelines,
+                monitor_alias: Quel3FixedTimeline(
+                    events=(),
+                    capture_windows=(
+                        Quel3CaptureWindow(
+                            "monitor_iq", capture_start_ns, capture_length_ns
+                        ),
+                    ),
+                    length_ns=timeline_length_ns,
+                ),
+            },
+            n_iterations=n_iterations,
+            shot_interval_ns=shot_interval_ns,
+            capture_mode=Quel3CaptureMode.RAW_WAVEFORMS,
+        )
+        result = self.execute_sync(
+            request=BackendExecutionRequest(payload=payload), parallel=parallel
+        )
+        if not isinstance(result, Quel3BackendExecutionResult):
+            raise TypeError("QuEL-3 execution did not return a backend result.")
+        try:
+            captured = np.asarray(result.data[monitor_alias][0], dtype=np.complex128)
+        except (KeyError, IndexError) as exc:
+            raise RuntimeError("QuEL-3 monitor execution returned no IQ data.") from exc
+        if captured.size == 0:
+            raise RuntimeError("QuEL-3 monitor execution returned no IQ data.")
+        return captured
 
     def execute_sync(
         self,
