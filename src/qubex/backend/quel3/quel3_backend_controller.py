@@ -689,12 +689,14 @@ class Quel3BackendController(BackendController):
 
         Notes
         -----
-        Every target must have an explicit finite frequency in GHz. The method
-        reads the live instruments, clears the selected unit, enters loopback
-        mode, and executes targets sequentially. It clears temporary
-        instruments and restores the original monitor mode and instrument
-        configuration even if deployment or execution fails. Blanks advance
-        event offsets without allocating zero-filled waveform samples.
+        Schedule frequencies are in GHz. A target without a frequency uses the
+        center of its live instrument's frequency range. The same frequency is
+        applied to the output and monitor instruments. The method reads the
+        live instruments, clears the selected unit, enters loopback mode, and
+        executes targets sequentially. It clears temporary instruments and
+        restores the original monitor mode and instrument configuration even
+        if deployment or execution fails. Blanks advance event offsets without
+        allocating zero-filled waveform samples.
         """
         if not unit_label.strip():
             raise ValueError("Unit label must not be empty.")
@@ -729,33 +731,6 @@ class Quel3BackendController(BackendController):
         if len(set(resolved_aliases.values())) != len(labels):
             raise ValueError("Output aliases must be distinct.")
 
-        prepared: dict[
-            str, tuple[Quel3FixedTimeline, dict[str, Quel3Waveform], float]
-        ] = {}
-        for label in labels:
-            waveform_library: dict[str, Quel3Waveform] = {}
-            events, _ = Quel3PulseEventBuilder.build(
-                sequence=pulse_schedule.get_sequence(label, copy=False),
-                waveform_name_by_shape_key={},
-                waveform_library=waveform_library,
-                waveform_index=0,
-            )
-            frequency_ghz = pulse_schedule.get_frequency(label)
-            if frequency_ghz is None or not math.isfinite(frequency_ghz):
-                raise ValueError(
-                    f"Monitor PulseSchedule target {label!r} requires a finite frequency."
-                )
-            prepared[label] = (
-                Quel3FixedTimeline(
-                    events=events,
-                    capture_windows=(),
-                    length_ns=pulse_schedule.duration,
-                    frequency_hz=frequency_ghz * 1e9,
-                ),
-                waveform_library,
-                frequency_ghz * 1e9,
-            )
-
         original_cache = InstrumentCache()
         original_cache.replace_all(
             instrument_infos=self._hardware_state_reader.read_instrument_infos(
@@ -766,6 +741,9 @@ class Quel3BackendController(BackendController):
         original_specs = {
             spec.alias: spec for spec in original_configuration.instruments
         }
+        prepared: dict[
+            str, tuple[Quel3FixedTimeline, dict[str, Quel3Waveform], float]
+        ] = {}
         for label in labels:
             alias = resolved_aliases[label]
             if alias == monitor_alias:
@@ -785,7 +763,16 @@ class Quel3BackendController(BackendController):
                 raise ValueError(
                     f"Monitor target {label!r} is not an output instrument."
                 )
-            frequency_hz = prepared[label][2]
+            frequency_ghz = pulse_schedule.get_frequency(label)
+            frequency_hz = (
+                spec.frequency_range_min_hz / 2 + spec.frequency_range_max_hz / 2
+                if frequency_ghz is None
+                else frequency_ghz * 1e9
+            )
+            if not math.isfinite(frequency_hz):
+                raise ValueError(
+                    f"Monitor PulseSchedule target {label!r} requires a finite frequency."
+                )
             if not (
                 spec.frequency_range_min_hz
                 <= frequency_hz
@@ -795,6 +782,23 @@ class Quel3BackendController(BackendController):
                     f"Monitor PulseSchedule frequency for {label!r} is outside "
                     f"the instrument range."
                 )
+            waveform_library: dict[str, Quel3Waveform] = {}
+            events, _ = Quel3PulseEventBuilder.build(
+                sequence=pulse_schedule.get_sequence(label, copy=False),
+                waveform_name_by_shape_key={},
+                waveform_library=waveform_library,
+                waveform_index=0,
+            )
+            prepared[label] = (
+                Quel3FixedTimeline(
+                    events=events,
+                    capture_windows=(),
+                    length_ns=pulse_schedule.duration,
+                    frequency_hz=frequency_hz,
+                ),
+                waveform_library,
+                frequency_hz,
+            )
 
         original_mode = self._configuration_manager.get_monitor_mode(
             unit_label=unit_label
