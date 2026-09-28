@@ -18,9 +18,14 @@ from qubex.backend.quel3 import (
     Quel3BackendExecutionResult,
     Quel3CaptureMode,
 )
+from qubex.backend.quel3.instrument_cache import InstrumentCache
 from qubex.backend.quel3.interfaces.client import InstrumentInfoProtocol
-from qubex.backend.quel3.managers import Quel3ConfigurationManager
+from qubex.backend.quel3.managers import (
+    Quel3ConfigurationManager,
+    Quel3HardwareStateReader,
+)
 from qubex.backend.quel3.models import InstrumentConfiguration, InstrumentSpec
+from qubex.backend.quel3.services import Quel3MonitorService
 
 
 class _MonitorClient:
@@ -218,18 +223,23 @@ def monitor_schedule_runtime(
         raising=False,
     )
 
-    def clear(*, unit_label: str, parallel: bool = True) -> None:
+    def clear(
+        *, unit_label: str, instrument_cache: InstrumentCache, parallel: bool = True
+    ) -> None:
         actions.append(("clear", unit_label))
-        controller._instrument_cache.replace_units(
-            unit_labels=(unit_label,), instrument_infos=()
-        )
+        instrument_cache.replace_units(unit_labels=(unit_label,), instrument_infos=())
 
     def configure(*, unit_label: str, mode: str = "loopback") -> str:
         actions.append(("mode", mode))
         return mode
 
     def deploy(
-        *, instrument: InstrumentSpec, append: bool = True, parallel: bool = True
+        *,
+        instrument: InstrumentSpec,
+        instrument_cache: InstrumentCache,
+        hardware_state_reader: object,
+        append: bool = True,
+        parallel: bool = True,
     ) -> InstrumentInfoProtocol:
         actions.append(
             (
@@ -242,26 +252,32 @@ def monitor_schedule_runtime(
             )
         )
         info = _instrument_info(instrument.alias, instrument.port_id.partition(":")[2])
-        controller._instrument_cache.replace_ports(
+        instrument_cache.replace_ports(
             port_ids=(instrument.port_id,), instrument_infos=(info,)
         )
         return info
 
     def restore(
-        *, configuration: InstrumentConfiguration, parallel: bool = True
+        *,
+        configuration: InstrumentConfiguration,
+        instrument_cache: InstrumentCache,
+        hardware_state_reader: object,
+        parallel: bool = True,
     ) -> dict[str, InstrumentInfoProtocol]:
         actions.append(
             ("restore", tuple(spec.alias for spec in configuration.instruments))
         )
-        controller._instrument_cache.replace_units(
+        instrument_cache.replace_units(
             unit_labels=("unit-a",), instrument_infos=originals
         )
         return {info.definition.alias: info for info in originals}
 
-    monkeypatch.setattr(controller, "clear_instruments", clear)
-    monkeypatch.setattr(controller, "configure_monitor_mode", configure)
-    monkeypatch.setattr(controller, "deploy_instrument", deploy)
-    monkeypatch.setattr(controller, "deploy_instruments", restore)
+    monkeypatch.setattr(controller.configuration_manager, "clear_instruments", clear)
+    monkeypatch.setattr(
+        controller.configuration_manager, "configure_monitor_mode", configure
+    )
+    monkeypatch.setattr(controller.configuration_manager, "deploy_instrument", deploy)
+    monkeypatch.setattr(controller.configuration_manager, "deploy_instruments", restore)
     return controller, manager, actions
 
 
@@ -528,16 +544,29 @@ def test_run_monitor_schedule_restores_instruments_after_deployment_failure(
 ) -> None:
     """Deployment failure should still clear temporary resources and restore state."""
     controller, _, actions = monitor_schedule_runtime
-    original_deploy = controller.deploy_instrument
+    original_deploy = controller.configuration_manager.deploy_instrument
 
     def fail_monitor_deploy(
-        *, instrument: InstrumentSpec, append: bool = True, parallel: bool = True
+        *,
+        instrument: InstrumentSpec,
+        instrument_cache: InstrumentCache,
+        hardware_state_reader: object,
+        append: bool = True,
+        parallel: bool = True,
     ) -> InstrumentInfoProtocol:
         if instrument.port_id == "unit-a:mon":
             raise RuntimeError("monitor deployment failed")
-        return original_deploy(instrument=instrument, append=append, parallel=parallel)
+        return original_deploy(
+            instrument=instrument,
+            instrument_cache=instrument_cache,
+            hardware_state_reader=cast(Any, hardware_state_reader),
+            append=append,
+            parallel=parallel,
+        )
 
-    monkeypatch.setattr(controller, "deploy_instrument", fail_monitor_deploy)
+    monkeypatch.setattr(
+        controller.configuration_manager, "deploy_instrument", fail_monitor_deploy
+    )
     with PulseSchedule() as schedule:
         schedule.add("drive", Arbitrary([1 + 0j], sampling_period=0.4))
     schedule.set_frequency("drive", 5.0)
@@ -665,3 +694,121 @@ def test_run_monitor_schedule_rejects_invalid_capture_before_deletion(
         )
 
     assert actions == []
+
+
+def test_monitor_service_runs_iq_with_shared_cache() -> None:
+    """The monitor service should execute IQ directly using its supplied cache."""
+    cache = InstrumentCache()
+    cache.replace_all(
+        instrument_infos=(
+            _instrument_info("output", "tx_p00"),
+            _instrument_info("monitor", "mon"),
+        )
+    )
+    manager = _MonitorExecutionManager()
+    service = Quel3MonitorService(
+        configuration_manager=Quel3ConfigurationManager(),
+        execution_manager=cast(Any, manager),
+        hardware_state_reader=Quel3HardwareStateReader(),
+        instrument_cache=cache,
+    )
+
+    captured = service.run_iq(
+        output_alias="output", monitor_alias="monitor", waveform=[0.5 + 0j]
+    )
+
+    assert np.array_equal(captured, [[1 + 2j, 3 + 4j]])
+    assert manager.request is not None
+    assert set(manager.request.payload.fixed_timelines) == {"output", "monitor"}
+
+
+def test_monitor_service_runs_schedule_without_controller_dependency(
+    monitor_schedule_runtime: tuple[
+        Quel3BackendController, _MonitorExecutionManager, list[tuple[object, ...]]
+    ],
+) -> None:
+    """A standalone monitor service should capture and restore the supplied unit."""
+    controller, manager, actions = monitor_schedule_runtime
+    service = Quel3MonitorService(
+        configuration_manager=controller.configuration_manager,
+        execution_manager=cast(Any, manager),
+        hardware_state_reader=controller.hardware_state_reader,
+        instrument_cache=controller._instrument_cache,
+    )
+    with PulseSchedule() as schedule:
+        schedule.add("output-a", Arbitrary([1 + 0j], sampling_period=0.4))
+
+    captured = service.run_schedule(unit_label="unit-a", pulse_schedule=schedule)
+
+    assert np.array_equal(captured["output-a"], [[1 + 2j, 3 + 4j]])
+    assert actions[-3:] == [
+        ("clear", "unit-a"),
+        ("mode", "disabled"),
+        ("restore", ("idle", "output-a", "output-b")),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("controller_method", "service_method", "arguments", "expected"),
+    [
+        (
+            "configure_monitor_mode",
+            "configure_mode",
+            {"unit_label": "unit-a", "mode": "loopback"},
+            "loopback",
+        ),
+        (
+            "run_monitor_iq",
+            "run_iq",
+            {
+                "output_alias": "output",
+                "monitor_alias": "monitor",
+                "waveform": [0.25 + 0j],
+                "capture_start_ns": 4.0,
+                "capture_length_ns": 8.0,
+                "n_iterations": 2,
+                "shot_interval_ns": 16.0,
+                "parallel": False,
+            },
+            np.array([[1 + 2j]]),
+        ),
+        (
+            "run_monitor_schedule",
+            "run_schedule",
+            {
+                "unit_label": "unit-a",
+                "pulse_schedule": PulseSchedule(),
+                "monitor_alias": "monitor",
+                "output_alias": None,
+                "output_aliases": {"drive": "output"},
+                "capture_start_ns": 4.0,
+                "capture_length_ns": 8.0,
+                "n_iterations": 2,
+                "shot_interval_ns": 16.0,
+                "parallel": False,
+            },
+            {"drive": np.array([[1 + 2j]])},
+        ),
+    ],
+)
+def test_controller_delegates_monitor_operations(
+    monkeypatch: pytest.MonkeyPatch,
+    controller_method: str,
+    service_method: str,
+    arguments: dict[str, Any],
+    expected: object,
+) -> None:
+    """Controller monitor methods should forward arguments and service results."""
+    calls: list[dict[str, object]] = []
+
+    def delegate(self: Quel3MonitorService, **kwargs: object) -> object:
+        calls.append(kwargs)
+        return expected
+
+    monkeypatch.setattr(Quel3MonitorService, service_method, delegate)
+    controller = Quel3BackendController()
+
+    result = getattr(controller, controller_method)(**arguments)
+
+    assert result is expected
+    assert calls == [arguments]
