@@ -60,6 +60,12 @@ class _FakeSystemManager:
         self.modified_backend_settings_calls += 1
         yield
 
+    @contextmanager
+    def prepare_frequency_sweep(self, *_args, **_kwargs):
+        """Given a settings override request, yield without side effects."""
+        self.modified_backend_settings_calls += 1
+        yield _kwargs.get("center_frequency", 1.0)
+
 
 class _FakeContext:
     """Experiment-context stub for electrical-delay tests."""
@@ -118,6 +124,11 @@ class _Quel3SystemManager:
         raise AssertionError("QuEL-3 spectroscopy must not retune backend settings")
         yield
 
+    @contextmanager
+    def prepare_frequency_sweep(self, *_args, **kwargs):
+        """Prepare direct-frequency execution without backend settings changes."""
+        yield kwargs.get("center_frequency") or 6.2
+
 
 class _Quel3Context(_FakeContext):
     """Experiment-context stub for QuEL-3 spectroscopy tests."""
@@ -159,6 +170,30 @@ class _Quel3Context(_FakeContext):
         )
 
 
+def _measurement_stub(ctx, measure):
+    def build_measurement_schedule(schedule, **kwargs):
+        return kwargs
+
+    async def run_sweep_measurement(schedule, *, sweep_values, **kwargs):
+        results = []
+        for value in sweep_values:
+            point = schedule(value)
+            ctx.current_frequency = next(iter(point["frequencies"].values()))
+            result = measure()
+            capture = result.data["Q00"]
+            results.append(
+                SimpleNamespace(
+                    data={"Q00": capture if isinstance(capture, list) else [capture]}
+                )
+            )
+        return SimpleNamespace(results=results)
+
+    return SimpleNamespace(
+        build_measurement_schedule=build_measurement_schedule,
+        run_sweep_measurement=run_sweep_measurement,
+    )
+
+
 def test_measure_electrical_delay_skips_redundant_reset_when_backend_settings_change(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -171,12 +206,12 @@ def test_measure_electrical_delay_skips_redundant_reset_when_backend_settings_ch
         signal = np.exp(-1j * 2 * np.pi * ctx.current_frequency)
         return SimpleNamespace(data={"Q00": SimpleNamespace(kerneled=signal)})
 
-    service.__dict__["_measurement_service"] = SimpleNamespace(measure=_fake_measure)
+    service.__dict__["_measurement_service"] = _measurement_stub(ctx, _fake_measure)
     service.__dict__["_calibration_service"] = SimpleNamespace()
     service.__dict__["_pulse_service"] = SimpleNamespace()
 
     monkeypatch.setattr(
-        "qubex.experiment.services.characterization_service.MixingUtil.calc_lo_cnco",
+        "qubex.system.system_manager.MixingUtil.calc_lo_cnco",
         lambda *_args, **_kwargs: (10_000_000_000, 1_500_000_000, 0),
     )
 
@@ -207,7 +242,7 @@ def test_measure_electrical_delay_quel3_uses_direct_frequency_sweep() -> None:
         signal = np.exp(-1j * 2 * np.pi * ctx.current_frequency)
         return SimpleNamespace(data={"Q00": SimpleNamespace(kerneled=signal)})
 
-    service.__dict__["_measurement_service"] = SimpleNamespace(measure=_fake_measure)
+    service.__dict__["_measurement_service"] = _measurement_stub(ctx, _fake_measure)
     service.__dict__["_calibration_service"] = SimpleNamespace()
     service.__dict__["_pulse_service"] = SimpleNamespace()
 

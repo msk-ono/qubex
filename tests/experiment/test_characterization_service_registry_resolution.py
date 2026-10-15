@@ -85,24 +85,29 @@ def test_measure_electrical_delay_resolves_labels_via_target_registry() -> None:
     reset_calls: list[list[str] | None] = []
 
     @contextmanager
-    def _modified_frequencies(
-        frequencies: dict[str, float],
-    ) -> Any:
-        modified_calls.append(frequencies)
-        yield
+    def prepare_frequency_sweep(label, **kwargs):
+        assert label == "RQ17"
+        reset_calls.append(["BOX0"])
+        yield kwargs["center_frequency"]
 
-    def _measure(
-        sequence: dict[str, np.ndarray],
-        **kwargs: object,
-    ) -> SimpleNamespace:
+    def build_measurement_schedule(schedule, **kwargs):
+        modified_calls.append(kwargs["frequencies"])
         measure_calls.append(
             {
-                "sequence_labels": list(sequence.keys()),
+                "sequence_labels": schedule.labels,
                 "readout_amplitudes": kwargs["readout_amplitudes"],
             }
         )
+        return schedule
+
+    async def run_sweep_measurement(schedule, *, sweep_values, **kwargs):
+        for value in sweep_values:
+            schedule(value)
         return SimpleNamespace(
-            data={"custom-target": SimpleNamespace(kerneled=np.complex128(1.0 + 0.0j))}
+            results=[
+                SimpleNamespace(data={"Q17": [SimpleNamespace(kerneled=1 + 0j)]})
+                for _ in sweep_values
+            ]
         )
 
     service = cast(Any, object.__new__(CharacterizationService))
@@ -127,9 +132,12 @@ def test_measure_electrical_delay_resolves_labels_via_target_registry() -> None:
             )
         },
         reset_awg_and_capunits=lambda box_ids=None: reset_calls.append(box_ids),
-        modified_frequencies=_modified_frequencies,
+        system_manager=SimpleNamespace(prepare_frequency_sweep=prepare_frequency_sweep),
     )
-    service.__dict__["_measurement_service"] = SimpleNamespace(measure=_measure)
+    service.__dict__["_measurement_service"] = SimpleNamespace(
+        build_measurement_schedule=build_measurement_schedule,
+        run_sweep_measurement=run_sweep_measurement,
+    )
     service.__dict__["_calibration_service"] = SimpleNamespace()
     service.__dict__["_pulse_service"] = SimpleNamespace()
 

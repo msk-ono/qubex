@@ -23,13 +23,13 @@ from qxpulse import (
     Rect,
     Waveform,
 )
-from rich.prompt import Confirm
 from tqdm.auto import tqdm
 from typing_extensions import deprecated
 
 import qubex.visualization as viz
 from qubex.analysis import FitResult, FitStatus, fitting
 from qubex.backend.backend_controller import BACKEND_KIND_QUEL3
+from qubex.core.async_bridge import get_shared_async_bridge
 from qubex.experiment.experiment_constants import (
     CALIBRATION_SHOTS,
     DEFAULT_INTERVAL,
@@ -50,6 +50,7 @@ from qubex.experiment.models.experiment_result import (
 )
 from qubex.experiment.models.rabi_param import RabiParam
 from qubex.experiment.models.result import Result
+from qubex.measurement import MeasurementSchedule, SweepMeasurementResult
 from qubex.system import MixingUtil
 from qubex.system.quel1.quel1_system_constants import CNCO_CENTER_CTRL_HZ
 from qubex.typing import TargetMap
@@ -632,6 +633,28 @@ class CharacterizationService:
     def calibration_service(self) -> CalibrationService:
         """Return the calibration service."""
         return self._calibration_service
+
+    def _run_spectroscopy_sweep(
+        self,
+        schedule: Callable[[Any], MeasurementSchedule],
+        sweep_values: NDArray,
+        *,
+        shots: int | None,
+        interval: float | None,
+    ) -> SweepMeasurementResult:
+        """Execute one spectroscopy interval through the shared sweep API."""
+        return get_shared_async_bridge(key="experiment").run_without_timeout(
+            lambda: self.measurement_service.run_sweep_measurement(
+                schedule,
+                sweep_values=sweep_values,
+                n_shots=shots,
+                shot_interval=interval,
+                shot_averaging=True,
+                time_integration=True,
+                state_classification=False,
+                enable_tqdm=True,
+            )
+        )
 
     def _uses_quel3_frequency_directives(self) -> bool:
         """Return whether spectroscopy should use QuEL-3 frequency directives."""
@@ -2410,6 +2433,10 @@ class CharacterizationService:
         -------
         float
             The electrical delay in ns.
+
+        Notes
+        -----
+        Frequency points execute together through `run_sweep_measurement`.
         """
         if shots is None:
             shots = DEFAULT_SHOTS
@@ -2422,76 +2449,44 @@ class CharacterizationService:
         read_label = self.ctx.resolve_read_label(target)
         qubit_label = self.ctx.resolve_qubit_label(target)
         mux = self.ctx.experiment_system.get_mux_by_qubit(qubit_label)
-        read_box = self.ctx.experiment_system.get_readout_box_for_qubit(qubit_label)
-        use_quel3_frequency_directives = self._uses_quel3_frequency_directives()
-        if use_quel3_frequency_directives:
-            current_frequency = self.ctx.targets[read_label].frequency
-        else:
-            ssb = self.ctx.targets[read_label].sideband
-            f_nco = self.ctx.targets[read_label].fine_frequency
-
         if df is None:
             df = DEFAULT_ELECTRICAL_DELAY_STEP_GHZ
         if n_samples is None:
             n_samples = DEFAULT_ELECTRICAL_DELAY_SAMPLES
         if readout_amplitude is None:
             readout_amplitude = DEFAULT_ELECTRICAL_DELAY_READOUT_AMPLITUDE
-        if f_start is None:
-            if use_quel3_frequency_directives:
-                f_start = current_frequency
-            else:
-                f_start = f_nco
-        frequency_range = np.arange(f_start, f_start + df * n_samples, df)
 
-        def _execute(*, reset_awg_and_capunits: bool = True):
-            if reset_awg_and_capunits:
-                self.ctx.reset_awg_and_capunits(box_ids=[read_box.id])
-            phases = []
-            for freq in tqdm(frequency_range, desc=f"electrical delay for {target}"):
-                with self.ctx.modified_frequencies({read_label: freq}):
-                    result = self._measurement_service.measure(
-                        {qubit_label: np.zeros(0)},
-                        mode="avg",
-                        readout_amplitudes={qubit_label: readout_amplitude},
-                        shots=shots,
-                        interval=interval,
-                        plot=False,
-                        reset_awg_and_capunits=False,
-                    )
-                    signal = result.data[target].kerneled
-                    phase = -np.angle(signal)
-                    phases.append(phase)
-            return phases
-
-        if use_quel3_frequency_directives:
-            phases = _execute(reset_awg_and_capunits=False)
-        elif abs(f_start - f_nco) > 0.2:
-            # if the frequency is far from the NCO frequency, we need to change the LO/NCO frequency
-            if confirm:
-                confirmed = Confirm.ask(
-                    "You are about to change the NCO frequencies. Do you want to proceed?"
-                )
-                if not confirmed:
-                    print("Operation cancelled.")
-                    return  # type: ignore
-
-            cnco_center = read_box.traits.readout_cnco_center
-            lo, cnco, _ = MixingUtil.calc_lo_cnco(
-                f_start * 1e9,
-                ssb=ssb,
-                cnco_center=cnco_center,
+        with self.ctx.system_manager.prepare_frequency_sweep(
+            read_label,
+            center_frequency=f_start,
+            retune_threshold=0.2,
+            confirm=confirm,
+        ) as resolved_start:
+            if resolved_start is None:
+                print("Operation cancelled.")
+                return  # type: ignore
+            frequency_range = np.arange(
+                resolved_start, resolved_start + df * n_samples, df
             )
-            with self.ctx.system_manager.modified_backend_settings(
-                label=read_label,
-                lo_freq=lo,
-                cnco_freq=cnco,
-                fnco_freq=0,
-            ):
-                logger.debug(f"LO: {lo}, CNCO: {cnco}")
-                phases = _execute(reset_awg_and_capunits=False)
-        else:
-            # if the frequency is close to the NCO frequency, we can use the current settings
-            phases = _execute()
+
+            def schedule(frequency: float) -> MeasurementSchedule:
+                return self.measurement_service.build_measurement_schedule(
+                    PulseSchedule.from_waveforms({qubit_label: np.zeros(0)}),
+                    frequencies={read_label: frequency},
+                    readout_amplitudes={qubit_label: readout_amplitude},
+                    final_measurement=True,
+                )
+
+            sweep = self._run_spectroscopy_sweep(
+                schedule,
+                frequency_range,
+                shots=shots,
+                interval=interval,
+            )
+            phases = [
+                -np.angle(result.data[qubit_label][-1].kerneled)
+                for result in sweep.results
+            ]
 
         unwrapped = np.unwrap(phases)
 
