@@ -36,6 +36,8 @@ from qubex.typing import ConfigurationMode
 from .config_loader import ConfigLoader
 from .control_system import Box
 from .experiment_system import ExperimentSystem
+from .quel1.quel1_port_configurator import MixingUtil
+from .quel1.quel1_system_constants import CNCO_CENTER_CTRL_HZ
 from .quel1.quel1_system_synchronizer import Quel1SystemSynchronizer
 from .quel3.quel3_system_synchronizer import Quel3SystemSynchronizer
 from .system_synchronizer import SystemSynchronizer
@@ -865,6 +867,94 @@ This operation will overwrite the existing backend settings. Do you want to cont
             self.experiment_system.modify_target_frequencies(original_frequencies)
             if callable(modify_target_frequencies):
                 modify_target_frequencies(original_frequencies)
+
+    @contextmanager
+    def prepare_frequency_sweep(
+        self,
+        label: str,
+        *,
+        center_frequency: float | None = None,
+        retune_threshold: float | None = None,
+        confirm: bool = False,
+    ) -> Iterator[float | None]:
+        """
+        Temporarily prepare a channel for a frequency sweep.
+
+        Parameters
+        ----------
+        label : str
+            Control or readout target label.
+        center_frequency : float | None, optional
+            Sweep tuning frequency in GHz. Defaults to the current NCO frequency
+            for mutable settings, or the target frequency for direct execution.
+        retune_threshold : float | None, optional
+            Retune only beyond this distance from the NCO frequency in GHz.
+            None always retunes backends with mutable settings.
+        confirm : bool, optional
+            Ask before changing oscillator settings.
+
+        Yields
+        ------
+        float | None
+            Resolved tuning frequency, or None when confirmation is declined.
+
+        Notes
+        -----
+        Mutable hardware settings are restored on exit, including exceptions.
+        Direct-frequency backends need no configuration changes or resets.
+        """
+        target = self.experiment_system.get_target(label)
+        if not self._supports_mutable_backend_settings_cache():
+            yield target.frequency if center_frequency is None else center_frequency
+            return
+
+        reference = target.fine_frequency
+        frequency = reference if center_frequency is None else center_frequency
+        if (
+            retune_threshold is not None
+            and abs(frequency - reference) <= retune_threshold
+        ):
+            initialize = getattr(
+                self.backend_controller, "initialize_awg_and_capunits", None
+            )
+            if not callable(initialize):
+                raise NotImplementedError(
+                    "Active backend does not support AWG/CAP unit reset."
+                )
+            initialize([target.channel.port.box_id])
+            yield frequency
+            return
+        if confirm and not Confirm.ask(
+            "You are about to change the NCO frequencies. Do you want to proceed?"
+        ):
+            yield None
+            return
+
+        qubit = self.experiment_system.resolve_qubit_label(label)
+        if target.is_read:
+            box = self.experiment_system.get_readout_box_for_qubit(qubit)
+            sideband = (
+                target.sideband
+                if retune_threshold is not None
+                else box.traits.readout_ssb
+            )
+            cnco_center = box.traits.readout_cnco_center
+        else:
+            box = self.experiment_system.get_control_box_for_qubit(qubit)
+            sideband = box.traits.ctrl_ssb
+            cnco_center = CNCO_CENTER_CTRL_HZ
+        lo, cnco, _ = MixingUtil.calc_lo_cnco(
+            frequency * 1e9,
+            ssb=sideband,
+            cnco_center=cnco_center,
+        )
+        with self.modified_backend_settings(
+            label=label,
+            lo_freq=lo,
+            cnco_freq=cnco,
+            fnco_freq=0,
+        ):
+            yield frequency
 
     @contextmanager
     def modified_backend_settings(
