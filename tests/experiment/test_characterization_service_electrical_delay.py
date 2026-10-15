@@ -55,12 +55,6 @@ class _FakeSystemManager:
         self.modified_backend_settings_calls = 0
 
     @contextmanager
-    def modified_backend_settings(self, *_args, **_kwargs):
-        """Given a settings override request, yield without side effects."""
-        self.modified_backend_settings_calls += 1
-        yield
-
-    @contextmanager
     def prepare_frequency_sweep(self, *_args, **_kwargs):
         """Given a settings override request, yield without side effects."""
         self.modified_backend_settings_calls += 1
@@ -115,14 +109,6 @@ class _FakeContext:
 
 class _Quel3SystemManager:
     """QuEL-3 system-manager stub that rejects QuEL-1 backend retunes."""
-
-    backend_kind = "quel3"
-
-    @contextmanager
-    def modified_backend_settings(self, *_args, **_kwargs):
-        """Given QuEL-3 spectroscopy, backend-settings retunes must not be used."""
-        raise AssertionError("QuEL-3 spectroscopy must not retune backend settings")
-        yield
 
     @contextmanager
     def prepare_frequency_sweep(self, *_args, **kwargs):
@@ -274,7 +260,7 @@ def test_scan_resonator_frequencies_avoids_duplicate_reset_per_subrange(
         signal = np.exp(-1j * 2 * np.pi * ctx.current_frequency)
         return SimpleNamespace(data={"Q00": SimpleNamespace(kerneled=signal)})
 
-    service.__dict__["_measurement_service"] = SimpleNamespace(measure=_fake_measure)
+    service.__dict__["_measurement_service"] = _measurement_stub(ctx, _fake_measure)
     service.__dict__["_calibration_service"] = SimpleNamespace()
     service.__dict__["_pulse_service"] = SimpleNamespace()
 
@@ -286,7 +272,7 @@ def test_scan_resonator_frequencies_avoids_duplicate_reset_per_subrange(
         ],
     )
     monkeypatch.setattr(
-        "qubex.experiment.services.characterization_service.MixingUtil.calc_lo_cnco",
+        "qubex.system.system_manager.MixingUtil.calc_lo_cnco",
         lambda *_args, **_kwargs: (10_000_000_000, 1_500_000_000, 0),
     )
     monkeypatch.setattr(
@@ -342,7 +328,7 @@ def test_scan_resonator_frequencies_forwards_interval_to_electrical_delay(
         _fake_measure_electrical_delay,
         service,
     )
-    service.__dict__["_measurement_service"] = SimpleNamespace(measure=_fake_measure)
+    service.__dict__["_measurement_service"] = _measurement_stub(ctx, _fake_measure)
     service.__dict__["_calibration_service"] = SimpleNamespace()
     service.__dict__["_pulse_service"] = SimpleNamespace()
 
@@ -353,7 +339,7 @@ def test_scan_resonator_frequencies_forwards_interval_to_electrical_delay(
         ],
     )
     monkeypatch.setattr(
-        "qubex.experiment.services.characterization_service.MixingUtil.calc_lo_cnco",
+        "qubex.system.system_manager.MixingUtil.calc_lo_cnco",
         lambda *_args, **_kwargs: (10_000_000_000, 1_500_000_000, 0),
     )
     monkeypatch.setattr(
@@ -401,7 +387,7 @@ def test_scan_resonator_frequencies_quel3_uses_direct_frequency_sweep(
         signal = np.exp(-1j * 2 * np.pi * ctx.current_frequency)
         return SimpleNamespace(data={"Q00": SimpleNamespace(kerneled=signal)})
 
-    service.__dict__["_measurement_service"] = SimpleNamespace(measure=_fake_measure)
+    service.__dict__["_measurement_service"] = _measurement_stub(ctx, _fake_measure)
     service.__dict__["_calibration_service"] = SimpleNamespace()
     service.__dict__["_pulse_service"] = SimpleNamespace()
 
@@ -441,7 +427,7 @@ def test_scan_qubit_frequencies_quel3_uses_direct_frequency_sweep(
         signal = np.exp(-1j * 2 * np.pi * ctx.current_frequency)
         return SimpleNamespace(data={"Q00": [SimpleNamespace(kerneled=signal)]})
 
-    service.__dict__["_measurement_service"] = SimpleNamespace(execute=_fake_execute)
+    service.__dict__["_measurement_service"] = _measurement_stub(ctx, _fake_execute)
     service.__dict__["_calibration_service"] = SimpleNamespace()
     service.__dict__["_pulse_service"] = SimpleNamespace()
 

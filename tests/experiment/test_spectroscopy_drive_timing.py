@@ -26,9 +26,17 @@ def test_experiment_spectroscopy_drive_timing(method, drive_mode, monkeypatch) -
     """Spectroscopy should separate control and readout only when explicitly requested."""
     schedules: list[PulseSchedule] = []
 
-    def execute(*, schedule: PulseSchedule, **kwargs):
-        schedules.append(schedule)
-        return SimpleNamespace(data={"Q00": [SimpleNamespace(kerneled=1 + 1j)]})
+    def build_measurement_schedule(schedule: PulseSchedule, **kwargs):
+        return schedule
+
+    async def run_sweep_measurement(schedule, *, sweep_values, **kwargs):
+        schedules.extend(schedule(value) for value in sweep_values)
+        return SimpleNamespace(
+            results=[
+                SimpleNamespace(data={"Q00": [SimpleNamespace(kerneled=1 + 1j)]})
+                for _ in sweep_values
+            ]
+        )
 
     ctx = SimpleNamespace(
         resolve_qubit_label=lambda target: "Q00",
@@ -44,14 +52,20 @@ def test_experiment_spectroscopy_drive_timing(method, drive_mode, monkeypatch) -
             )
         ),
         system_manager=SimpleNamespace(
-            modified_backend_settings=lambda **kwargs: nullcontext()
+            prepare_frequency_sweep=lambda *args, **kwargs: nullcontext()
         ),
         modified_frequencies=lambda frequencies: nullcontext(),
         reset_awg_and_capunits=lambda **kwargs: None,
     )
     service = CharacterizationService(
         experiment_context=cast(Any, ctx),
-        measurement_service=cast(Any, SimpleNamespace(execute=execute)),
+        measurement_service=cast(
+            Any,
+            SimpleNamespace(
+                build_measurement_schedule=build_measurement_schedule,
+                run_sweep_measurement=run_sweep_measurement,
+            ),
+        ),
         calibration_service=cast(Any, None),
         pulse_service=cast(Any, None),
     )
