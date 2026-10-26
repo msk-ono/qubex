@@ -164,15 +164,20 @@ def test_iq_plotter_show_displays_detached_figure_and_closes_widget(
 
 
 def test_iq_plotter_clear_closes_widget_once(monkeypatch) -> None:
-    """Given a live widget, when clearing repeatedly, then widget resources close once."""
+    """Repeated cleanup should close resources once without clearing later output."""
     plotter = IQPlotter()
     closed = []
+    cleared = []
 
     monkeypatch.setattr(
         plotter.__dict__["_widget"], "close", lambda: closed.append(True)
+    )
+    monkeypatch.setattr(
+        plotter.__dict__["_output"], "clear_output", lambda: cleared.append(True)
     )
 
     plotter.clear()
     plotter.clear()
 
     assert closed == [True]
+    assert cleared == [True]

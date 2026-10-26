@@ -10,9 +10,108 @@ import numpy as np
 import pytest
 from qxpulse import Blank, PulseSchedule
 
+import qubex.experiment.services.measurement_service as measurement_service_module
 from qubex.experiment.models.rabi_param import RabiParam
 from qubex.experiment.services.measurement_service import MeasurementService
 from qubex.measurement import MeasurementResultConverter
+
+
+@pytest.mark.parametrize("execution", ["sequential", "batch"])
+@pytest.mark.parametrize(
+    "outcome",
+    [
+        "success",
+        "plot_disabled",
+        "reset_error",
+        "measure_error",
+        "interrupted",
+        "update_error",
+        "show_error",
+    ],
+)
+def test_sweep_parameter_closes_plotter_on_every_exit(
+    monkeypatch: pytest.MonkeyPatch, execution: str, outcome: str
+) -> None:
+    """Sequential and batch sweeps should close their plotter on success, failure, or interruption."""
+    events: list[str] = []
+    error = (
+        KeyboardInterrupt()
+        if outcome == "interrupted"
+        else RuntimeError("sweep failed")
+    )
+
+    class _Plotter:
+        def __init__(self, _state_centers: object) -> None:
+            events.append("created")
+
+        def update(self, _data: object) -> None:
+            if outcome == "update_error":
+                raise error
+
+        def show(self) -> None:
+            events.append("shown")
+            if outcome == "show_error":
+                raise error
+
+        def close(self) -> None:
+            events.append("closed")
+
+    def reset(**_kwargs: Any) -> None:
+        if outcome == "reset_error":
+            raise error
+
+    @contextmanager
+    def modified_frequencies(_frequencies: object) -> Any:
+        yield
+
+    service = MeasurementService(
+        experiment_context=cast(
+            Any,
+            SimpleNamespace(
+                state_centers={},
+                ordered_qubit_labels=list,
+                reset_awg_and_capunits=reset,
+                modified_frequencies=modified_frequencies,
+            ),
+        ),
+        pulse_service=cast(Any, SimpleNamespace()),
+    )
+
+    def measure(*_args: Any, **kwargs: Any) -> Any:
+        if outcome in ("measure_error", "interrupted"):
+            raise error
+        if "signals" in kwargs:
+            kwargs["signals"]["Q00"].append(1.0 + 2.0j)
+        return SimpleNamespace(data={"Q00": SimpleNamespace(kerneled=1.0 + 2.0j)})
+
+    monkeypatch.setattr(measurement_service_module, "IQPlotter", _Plotter)
+    monkeypatch.setattr(service, "measure", measure)
+    monkeypatch.setattr(service, "_run_sweep_parameter_batch", measure)
+    monkeypatch.setattr(service, "_get_sweep_rabi_params", lambda **_: {})
+
+    def sequence(_value: float) -> dict[str, Blank]:
+        return {"Q00": Blank(8)}
+
+    def run() -> Any:
+        return service.sweep_parameter(
+            sequence=sequence,
+            sweep_range=[0.0],
+            sweep_execution=cast(Any, execution),
+            plot=outcome != "plot_disabled",
+        )
+
+    if outcome in ("success", "plot_disabled"):
+        assert run().data["Q00"].target == "Q00"
+    else:
+        with pytest.raises(type(error)) as exc_info:
+            run()
+        assert exc_info.value is error
+
+    assert events == (
+        ["created", "shown", "closed"]
+        if outcome in ("success", "show_error")
+        else ["created", "closed"]
+    )
 
 
 def _stub_measurement_result_converter(monkeypatch: pytest.MonkeyPatch) -> None:

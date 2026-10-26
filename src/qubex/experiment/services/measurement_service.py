@@ -462,11 +462,12 @@ class MeasurementService:
                     config=config,
                     on_point=on_point,
                 )
+            if plotter is not None and len(signals) > 0:
+                plotter.show()
         finally:
             progress.close()
-
-        if plot and plotter is not None and len(signals) > 0:
-            plotter.show()
+            if plotter is not None:
+                plotter.close()
 
         return result
 
@@ -1164,73 +1165,76 @@ class MeasurementService:
             }
         )
 
-        # initialize awgs and capture units
-        self.ctx.reset_awg_and_capunits(qubits=set(ordered_qubits))
+        try:
+            # initialize awgs and capture units
+            self.ctx.reset_awg_and_capunits(qubits=set(ordered_qubits))
 
-        if is_batch_execution:
-            self._run_sweep_parameter_batch(
-                sequence=sequence,
-                sweep_range=sweep_range,
-                repetitions=repetitions,
-                frequencies=frequencies,
-                initial_states=initial_states,
-                n_shots=n_shots,
-                shot_interval=shot_interval,
-                readout_amplitudes=readout_amplitudes,
-                readout_duration=readout_duration,
-                readout_pre_margin=readout_pre_margin,
-                readout_post_margin=readout_post_margin,
-                enable_tqdm=enable_tqdm,
-                deprecated_options=deprecated_options,
-                ordered_qubits=ordered_qubits,
-                signals=signals,
-            )
-            if plot:
-                plotter.update(
-                    {
-                        target: np.asarray(values)
-                        for target, values in signals.items()
-                        if values
-                    }
+            if is_batch_execution:
+                self._run_sweep_parameter_batch(
+                    sequence=sequence,
+                    sweep_range=sweep_range,
+                    repetitions=repetitions,
+                    frequencies=frequencies,
+                    initial_states=initial_states,
+                    n_shots=n_shots,
+                    shot_interval=shot_interval,
+                    readout_amplitudes=readout_amplitudes,
+                    readout_duration=readout_duration,
+                    readout_pre_margin=readout_pre_margin,
+                    readout_post_margin=readout_post_margin,
+                    enable_tqdm=enable_tqdm,
+                    deprecated_options=deprecated_options,
+                    ordered_qubits=ordered_qubits,
+                    signals=signals,
                 )
-        else:
-            with self.ctx.modified_frequencies(frequencies):
-                for seq in tqdm(
-                    sequences,
-                    desc="Sweeping parameters",
-                    disable=not enable_tqdm,
-                ):
-                    result = self.measure(
-                        seq,
-                        initial_states=initial_states,
-                        mode="avg",
-                        n_shots=n_shots,
-                        shot_interval=shot_interval,
-                        readout_amplitudes=readout_amplitudes,
-                        readout_duration=readout_duration,
-                        readout_pre_margin=readout_pre_margin,
-                        readout_post_margin=readout_post_margin,
-                        reset_awg_and_capunits=False,
-                        **deprecated_options,
+                if plot:
+                    plotter.update(
+                        {
+                            target: np.asarray(values)
+                            for target, values in signals.items()
+                            if values
+                        }
                     )
-                    for target in ordered_qubits:
-                        if target in result.data:
-                            signals[target].append(result.data[target].kerneled)
-                    for target, data in result.data.items():
-                        if target in signals:
-                            continue
-                        signals[target] = [data.kerneled]
-                    if plot:
-                        plotter.update(
-                            {
-                                target: np.asarray(values)
-                                for target, values in signals.items()
-                                if values
-                            }
+            else:
+                with self.ctx.modified_frequencies(frequencies):
+                    for seq in tqdm(
+                        sequences,
+                        desc="Sweeping parameters",
+                        disable=not enable_tqdm,
+                    ):
+                        result = self.measure(
+                            seq,
+                            initial_states=initial_states,
+                            mode="avg",
+                            n_shots=n_shots,
+                            shot_interval=shot_interval,
+                            readout_amplitudes=readout_amplitudes,
+                            readout_duration=readout_duration,
+                            readout_pre_margin=readout_pre_margin,
+                            readout_post_margin=readout_post_margin,
+                            reset_awg_and_capunits=False,
+                            **deprecated_options,
                         )
+                        for target in ordered_qubits:
+                            if target in result.data:
+                                signals[target].append(result.data[target].kerneled)
+                        for target, data in result.data.items():
+                            if target in signals:
+                                continue
+                            signals[target] = [data.kerneled]
+                        if plot:
+                            plotter.update(
+                                {
+                                    target: np.asarray(values)
+                                    for target, values in signals.items()
+                                    if values
+                                }
+                            )
 
-        if plot:
-            plotter.show()
+            if plot:
+                plotter.show()
+        finally:
+            plotter.close()
 
         measured_targets = [target for target, values in signals.items() if values]
         rabi_params = self._get_sweep_rabi_params(

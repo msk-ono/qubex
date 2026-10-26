@@ -155,9 +155,9 @@ class IQPlotter:
 
     def clear(self) -> None:
         """Clear and close the live widget output."""
-        self._output.clear_output()
         if self._closed:
             return
+        self._output.clear_output()
         self._output.close()
         self._widget.close()
         self._closed = True

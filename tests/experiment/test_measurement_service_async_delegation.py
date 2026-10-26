@@ -354,6 +354,9 @@ def test_run_sweep_measurement_plots_iq_and_updates_tqdm(
         def show(self) -> None:
             calls["plot"]["shown"] = True
 
+        def close(self) -> None:
+            calls["plot"]["closed"] = True
+
     class _Progress:
         def __init__(self, *, total: int, desc: str, disable: bool) -> None:
             calls["progress"]["total"] = total
@@ -422,6 +425,79 @@ def test_run_sweep_measurement_plots_iq_and_updates_tqdm(
     assert np.asarray(plotted)[0] == pytest.approx(1.0 + 2.0j)
     assert np.asarray(plotted)[1] == pytest.approx(1.0 + 2.0j)
     assert calls["plot"]["shown"] is True
+    assert calls["plot"]["closed"] is True
+
+
+@pytest.mark.parametrize(
+    "outcome",
+    ["empty", "error", "cancelled", "interrupted", "update_error", "show_error"],
+)
+def test_run_sweep_measurement_closes_plotter_on_every_exit(
+    monkeypatch: pytest.MonkeyPatch, outcome: str
+) -> None:
+    """An empty, failed, or interrupted sweep should close its plotter and preserve errors."""
+    service, _ = _make_service()
+    service.ctx.state_centers = {}  # type: ignore[attr-defined]
+    events: list[str] = []
+    error = {
+        "cancelled": asyncio.CancelledError(),
+        "interrupted": KeyboardInterrupt(),
+    }.get(outcome, RuntimeError("sweep failed"))
+
+    class _Plotter:
+        def __init__(self, _state_centers: object) -> None:
+            events.append("created")
+
+        def update(self, _data: object) -> None:
+            if outcome == "update_error":
+                raise error
+
+        def show(self) -> None:
+            events.append("shown")
+            if outcome == "show_error":
+                raise error
+
+        def close(self) -> None:
+            events.append("closed")
+
+    async def _run_sweep_measurement(_schedule: Any, **kwargs: Any) -> str:
+        if outcome == "empty":
+            return "empty_result"
+        kwargs["on_point"](
+            0,
+            SimpleNamespace(
+                data={"Q00": [SimpleNamespace(data=np.array([1.0 + 2.0j]))]}
+            ),
+        )
+        if outcome != "show_error":
+            raise error
+        return "sweep_result"
+
+    monkeypatch.setattr(measurement_service_module, "IQPlotter", _Plotter)
+    monkeypatch.setattr(
+        service.ctx.measurement, "run_sweep_measurement", _run_sweep_measurement
+    )
+
+    def run() -> Any:
+        return asyncio.run(
+            service.run_sweep_measurement(
+                lambda _: _measurement_schedule(), sweep_values=[0], plot=True
+            )
+        )
+
+    if outcome == "empty":
+        assert run() == "empty_result"
+    else:
+        with pytest.raises(type(error)) as exc_info:
+            run()
+        if outcome != "cancelled":
+            assert exc_info.value is error
+
+    assert events == (
+        ["created", "shown", "closed"]
+        if outcome == "show_error"
+        else ["created", "closed"]
+    )
 
 
 def test_run_ndsweep_measurement_builds_wrapped_schedule_and_delegates() -> None:
