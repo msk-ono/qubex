@@ -9,7 +9,7 @@ from typing import Any, cast
 
 import numpy as np
 import pytest
-from plotly.graph_objects import Figure
+from plotly.graph_objects import Figure, Scatter
 
 from qubex.contrib import spin_lock_relaxation, spin_lock_relaxation_spectroscopy
 from qubex.contrib.experiment import (
@@ -963,12 +963,12 @@ def test_spectroscopy_omits_low_initial_amplitudes_from_relaxation_plots() -> No
     assert result["t2_exclusion_messages"][0] is None
 
     summary = figures["Q00_relaxation_spectroscopy"]
-    summary_data = _figure_data(summary)
-    assert np.isnan(np.asarray(summary_data[0]["y"])[0])
-    assert np.isfinite(np.asarray(summary_data[0]["y"])[1])
-    assert np.isfinite(np.asarray(summary_data[1]["y"])[0])
-    assert np.isnan(np.asarray(summary_data[1]["y"])[1])
-    assert np.all(np.isfinite(np.asarray(summary_data[2]["y"])))
+    summary_y = [np.asarray(cast(Scatter, trace).y) for trace in summary.data]
+    assert np.isnan(summary_y[0][0])
+    assert np.isfinite(summary_y[0][1])
+    assert np.isfinite(summary_y[1][0])
+    assert np.isnan(summary_y[1][1])
+    assert np.all(np.isfinite(summary_y[2]))
 
 
 def test_spectroscopy_analysis_continues_after_one_fit_failure() -> None:

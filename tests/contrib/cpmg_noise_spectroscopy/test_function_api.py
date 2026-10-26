@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
-from typing import Any, cast
+from typing import cast
 
 import numpy as np
 import plotly.graph_objects as go
@@ -63,6 +63,6 @@ def test_plot_cpmg_results_accepts_in_memory_payload() -> None:
     )
 
     assert isinstance(fig, go.Figure)
-    figure_data = cast(list[dict[str, Any]], fig.to_dict()["data"])
-    assert len(figure_data) == 1
-    np.testing.assert_allclose(figure_data[0]["x"], [0.0, 10.0])
+    traces = cast(tuple[go.Scatter, ...], fig.data)
+    assert len(traces) == 1
+    np.testing.assert_allclose(np.asarray(traces[0].x), [0.0, 10.0], rtol=1e-7, atol=0)
