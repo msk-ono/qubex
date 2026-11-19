@@ -44,6 +44,9 @@ async def survey_transfer(
     off_ground: float,
     shots_search: int = 64,
     shots_fit: int = 192,
+    *,
+    frequency_step_mhz: float | None = None,
+    max_frequency_points: int = 65,
 ) -> dict[str, Any]:
     """
     Discover disconnected transfer peaks at a fixed amplitude and duration.
@@ -52,11 +55,24 @@ async def survey_transfer(
     assignment fractions at the requested frequencies and shot count. An initial
     coarse grid covers both CKP poles and their flanks. Extend an active edge
     once, then independently resolve up to two peaks away from known lines.
+    Each fine window contains eleven local samples and up to two remeasured
+    shoulders from the coarse grid. The initial window uses at most
+    `max_frequency_points`; extending both edges at most doubles that budget.
     """
     reach = float(np.clip(max(2 * np.ptp(nominal), 3 * np.max(widths)), 80, 120))
     low, high = np.min(nominal) - reach, np.max(nominal) + reach
-    spacing = float(np.clip(0.65 * np.min(widths), 2, 5))
-    x = np.linspace(low, high, min(65, int(np.ceil((high - low) / spacing)) + 1))
+    spacing = (
+        float(np.clip(0.65 * np.min(widths), 2, 5))
+        if frequency_step_mhz is None
+        else frequency_step_mhz
+    )
+    if not np.isfinite(spacing) or spacing <= 0 or max_frequency_points < 5:
+        raise ValueError(
+            "Survey resolution requires a positive spacing and at least five points"
+        )
+    x = np.linspace(
+        low, high, min(max_frequency_points, int(np.ceil((high - low) / spacing)) + 1)
+    )
     step = x[1] - x[0]
     y = await measure(x, shots_search)
     prominence = max(0.08, 1 / np.sqrt(shots_search))
@@ -82,7 +98,15 @@ async def survey_transfer(
     remote.sort(key=lambda f: y[np.searchsorted(x, f)], reverse=True)
     confirmed = []
     if remote:
-        windows = [f + step * np.linspace(-2, 2, 11) for f in remote[:2]]
+        windows = []
+        for center in remote[:2]:
+            # A saturated transfer band can be flat across the fine grid.
+            # Remeasure a coarse shoulder on either side to establish prominence.
+            fine = center + step * np.linspace(-2, 2, 11)
+            shoulder_level = y[np.searchsorted(x, center)] - 1.5 * prominence
+            lower = x[(x < fine[0]) & (y <= shoulder_level)]
+            upper = x[(x > fine[-1]) & (y <= shoulder_level)]
+            windows.append(np.r_[lower[-1:], fine, upper[:1]])
         frequencies = np.unique(np.concatenate([known_f, *windows]))
         ground = await measure(frequencies, shots_fit)
         reference = max(
@@ -209,6 +233,11 @@ def transfer(
     return np.array(values)
 
 
+def heldout_time_mask(times: NDArray) -> NDArray:
+    """Withhold every fourth time sample across all drives and shift windows."""
+    return np.arange(len(times)) % 4 == 2
+
+
 def fit_transfer(
     f: NDArray,
     t: NDArray,
@@ -228,7 +257,7 @@ def fit_transfer(
     with its photon population linewidth fixed to the CKP value.
     """
     t, pf = np.asarray(t), np.asarray(pf)
-    train = np.arange(len(t)) % 4 != 2
+    train = ~heldout_time_mask(t)
     lo = [0.001, shift_guess - 30, 0, 0]
     hi = [80, shift_guess + 30, 1.3, 0.9]
     poles, widths = mode_parameters(ckp)
