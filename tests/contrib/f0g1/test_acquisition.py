@@ -14,14 +14,21 @@ from qubex.contrib.experiment._f0g1_acquisition import (
     _measure_populations,
     build_f0g1_reset,
 )
-from qubex.pulse import Rect
+from qubex.measurement.measurement_constraint_profile import (
+    MeasurementConstraintProfile,
+)
+from qubex.measurement.measurement_schedule_builder import MeasurementScheduleBuilder
+from qubex.pulse import Rect, Waveform
 
 
 @pytest.fixture
-def experiment():
+def experiment(monkeypatch):
     """Return calibrated reset aliases and a three-state assignment model."""
     exp = Mock()
     exp.ctx.measurement.sampling_period = 0.4
+    monkeypatch.setattr(
+        Waveform, "SAMPLING_PERIOD", exp.ctx.measurement.sampling_period
+    )
     exp.backend_controller = Mock(spec=Quel3BackendController)
     exp.targets = {
         label: SimpleNamespace(frequency=freq)
@@ -39,6 +46,53 @@ def experiment():
         duration=20, amplitude=0.1, sampling_period=0.4
     )
     return exp
+
+
+@pytest.mark.parametrize(("state", "prep_ns"), [("g", 0), ("e", 20), ("f", 40)])
+@pytest.mark.parametrize("wait_ns", [100, 0])
+def test_final_capture_follows_preparation_drive_and_wait(
+    experiment, state, prep_ns, wait_ns
+):
+    """OFF references and driven points must reach final readout after the full sequence."""
+    opts = F0G1AcquisitionOptions(wait_duration=wait_ns, n_shots=4)
+    points = (
+        F0G1PulseParameters(0, 1.85, 0, 4.0, 0),
+        F0G1PulseParameters(91.6, 1.85, 0, 4.0, 0),
+        F0G1PulseParameters(91.6, 1.85, 0.8, 4.0, 0.1),
+    )
+    builder = MeasurementScheduleBuilder(
+        control_params=Mock(readout_amplitude={"RQ": 0.1}),
+        pulse_factory=Mock(
+            readout_pulse=Mock(return_value=Rect(duration=16, amplitude=0.1))
+        ),
+        targets={label: Mock(is_pump=False) for label in experiment.targets},
+        mux_dict={},
+        target_registry=Mock(resolve_read_label=Mock(return_value="RQ")),
+        constraint_profile=MeasurementConstraintProfile.quel3(
+            experiment.ctx.measurement.sampling_period
+        ),
+    )
+
+    async def acquire(
+        schedule, *, sweep_values, n_shots, frequencies, final_measurement, **_
+    ):
+        for i in sweep_values:
+            measured = builder.build(
+                schedule=schedule(i),
+                frequencies=frequencies,
+                final_measurement=final_measurement,
+            )
+            (capture,) = measured.capture_schedule.captures
+            assert capture.channels == ["RQ"]
+            assert capture.start_time == pytest.approx(
+                prep_ns + points[i].duration + wait_ns
+            )
+        return SimpleNamespace(
+            data={"Q": [np.zeros((len(sweep_values), n_shots), dtype=complex)]}
+        )
+
+    experiment.run_sweep_measurement = acquire
+    asyncio.run(_measure_populations(experiment, "Q", points, opts, (state,)))
 
 
 def test_off_control_has_same_elapsed_time_as_two_tone(experiment):

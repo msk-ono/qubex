@@ -351,6 +351,8 @@ async def _measure_populations(
                 prepared.call(
                     build_f0g1_reset(exp, target, batch[int(index)], options=options)
                 )
+                # The preparation ef channel is idle throughout the reset and wait.
+                prepared.barrier()
                 prepared.set_frequencies(carriers)
                 return prepared
 
